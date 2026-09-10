@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
 from numbers import Real
 import stat
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, Sequence
 from urllib.parse import urlsplit
 
@@ -27,6 +27,7 @@ from .models import TextScorer, load_text_scorer
 from .constants import LABELS
 from .evidence import build_evidence
 from .lyrics import compose_lyrics
+from .request_audio import RequestAudioConfig, RequestAudioResult, acquire_request_audio
 from .train import BUNDLE_POINTER_SCHEMA_VERSION, MODEL_TYPE, REPORT_SCHEMA_VERSION
 from .types import Song
 
@@ -34,7 +35,9 @@ from .types import Song
 _MAX_POINTER_BYTES = 64 * 1024
 _MAX_REPORT_BYTES = 1024 * 1024
 MAX_REQUEST_BODY_BYTES = 110_000
+MAX_INTERNAL_REQUEST_SECONDS = 25.0
 _REQUEST_STARTED_AT_SCOPE_KEY = "competition_emotion.request_started_at"
+_REQUEST_MONOTONIC_STARTED_AT_SCOPE_KEY = "competition_emotion.request_monotonic_started_at"
 
 
 class RecognizeRequest(BaseModel):
@@ -102,6 +105,28 @@ class _Runtime:
     model_version: str
 
 
+@dataclass(frozen=True)
+class ServiceAudioConfig:
+    """Audio behavior for the synchronous service; ``None`` disables it in tests."""
+
+    request_config: RequestAudioConfig = field(default_factory=RequestAudioConfig)
+    request_deadline_seconds: float = MAX_INTERNAL_REQUEST_SECONDS
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_config, RequestAudioConfig):
+            raise ValueError("request_config must be a RequestAudioConfig")
+        if (
+            isinstance(self.request_deadline_seconds, bool)
+            or not isinstance(self.request_deadline_seconds, (int, float))
+            or not math.isfinite(float(self.request_deadline_seconds))
+            or not 0.0 < float(self.request_deadline_seconds) <= MAX_INTERNAL_REQUEST_SECONDS
+        ):
+            raise ValueError("request_deadline_seconds must be positive and no greater than 25")
+
+
+_DEFAULT_SERVICE_AUDIO_CONFIG = ServiceAudioConfig()
+
+
 class _RequestBodyLimitMiddleware:
     """Reject oversized request bodies before and while FastAPI parses JSON."""
 
@@ -114,6 +139,7 @@ class _RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         scope[_REQUEST_STARTED_AT_SCOPE_KEY] = perf_counter()
+        scope[_REQUEST_MONOTONIC_STARTED_AT_SCOPE_KEY] = monotonic()
         content_length = Headers(scope=scope).get("content-length")
         if content_length is not None:
             try:
@@ -298,8 +324,10 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
     return _Runtime(scorer=scorer, model_type=MODEL_TYPE, model_version=model_version)
 
 
-def create_app(bundle_root: Path) -> FastAPI:
+def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _DEFAULT_SERVICE_AUDIO_CONFIG) -> FastAPI:
     """Create a ready FastAPI service from one fully validated model bundle."""
+    if audio_config is not None and not isinstance(audio_config, ServiceAudioConfig):
+        raise ValueError("audio_config must be a ServiceAudioConfig or None")
     runtime = _load_runtime(Path(bundle_root))
     app = FastAPI(title="Competition Emotion Service", version=runtime.model_version)
     app.add_middleware(_RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
@@ -368,9 +396,22 @@ def create_app(bundle_root: Path) -> FastAPI:
             raise RuntimeError("model returned insufficient labels")
         ranked.sort(key=lambda item: item[1], reverse=True)
         (top_emotion, top_confidence), (second_emotion, second_confidence) = ranked[:2]
+        audio_result = RequestAudioResult("unavailable")
+        if audio_config is not None:
+            request_started_at = http_request.scope[_REQUEST_MONOTONIC_STARTED_AT_SCOPE_KEY]
+            request_deadline = request_started_at + float(audio_config.request_deadline_seconds)
+            try:
+                audio_result = acquire_request_audio(
+                    request.audio_url,
+                    audio_config.request_config,
+                    deadline_monotonic=request_deadline,
+                )
+            except (ValueError, RuntimeError, OSError, TimeoutError):
+                audio_result = RequestAudioResult("unavailable")
         evidence = build_evidence(
             lyric_used=lyric_used,
             title_used=not lyric_used,
+            audio_state=audio_result.state if audio_config is not None else None,
         )
         return RecognizeResponse(
             code=200,
@@ -393,10 +434,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bundle-root", required=True, type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
+    parser.add_argument("--audio-proxy-url")
+    parser.add_argument("--audio-allowed-host", action="append", default=None)
+    parser.add_argument("--audio-temp-root", type=Path)
+    parser.add_argument("--audio-budget-seconds", default=20.0, type=float)
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65_535:
         parser.error("--port must be between 1 and 65535")
-    uvicorn.run(create_app(arguments.bundle_root), host=arguments.host, port=arguments.port)
+    if arguments.audio_proxy_url is not None and not arguments.audio_allowed_host:
+        parser.error("--audio-proxy-url requires at least one --audio-allowed-host")
+    if arguments.audio_proxy_url is None and arguments.audio_allowed_host:
+        parser.error("--audio-allowed-host requires --audio-proxy-url")
+    try:
+        request_audio_config = RequestAudioConfig(
+            temp_root=arguments.audio_temp_root,
+            total_seconds=arguments.audio_budget_seconds,
+            proxy_url=arguments.audio_proxy_url,
+            allowed_hosts=arguments.audio_allowed_host,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    uvicorn.run(
+        create_app(
+            arguments.bundle_root,
+            audio_config=ServiceAudioConfig(request_config=request_audio_config),
+        ),
+        host=arguments.host,
+        port=arguments.port,
+    )
     return 0
 
 

@@ -16,6 +16,7 @@ import numpy as np
 
 from competition_emotion.constants import LABELS
 from competition_emotion.models import TextScorer, save_text_scorer
+from competition_emotion.request_audio import RequestAudioResult
 from competition_emotion.service import MAX_REQUEST_BODY_BYTES, create_app
 from competition_emotion.types import Song
 
@@ -74,7 +75,7 @@ def _write_bundle(root: Path) -> Path:
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
-        self.app = create_app(_write_bundle(Path(self.directory.name) / "bundle"))
+        self.app = create_app(_write_bundle(Path(self.directory.name) / "bundle"), audio_config=None)
         self.client = TestClient(self.app)
 
     def tearDown(self) -> None:
@@ -134,6 +135,43 @@ class ServiceTests(unittest.TestCase):
         self.assertIsInstance(response.json()["data"]["cost_ms"], int)
         self.assertGreaterEqual(response.json()["data"]["cost_ms"], 0)
         self.assertLessEqual(response.json()["data"]["cost_ms"], elapsed_ms + 100)
+
+    def test_audio_state_changes_only_evidence_and_never_the_ranked_output(self) -> None:
+        audio_app = create_app(_write_bundle(Path(self.directory.name) / "audio-bundle"))
+        audio_client = TestClient(audio_app)
+        scored = self._scores(狂欢=0.8, 孤独=0.2)
+
+        def recognize_with(state: str) -> dict[str, object]:
+            result = RequestAudioResult(
+                "measured", {"rms_db": -3.0}
+            ) if state == "measured" else RequestAudioResult("unavailable")
+            with patch.object(audio_app.state.runtime.scorer, "score", return_value=scored), patch(
+                "competition_emotion.service.acquire_request_audio", return_value=result
+            ):
+                response = audio_client.post("/api/v1/emotion/recognize", json=self._request(text_lyric="任意歌词"))
+            self.assertEqual(response.status_code, 200)
+            return response.json()["data"]
+
+        measured = recognize_with("measured")
+        unavailable = recognize_with("unavailable")
+        self.assertEqual(
+            (measured["top_emotion"], measured["top_confidence"], measured["second_emotion"], measured["second_confidence"]),
+            (unavailable["top_emotion"], unavailable["top_confidence"], unavailable["second_emotion"], unavailable["second_confidence"]),
+        )
+        self.assertIn("音频已完成测量", measured["evidence"])
+        self.assertIn("未用于当前标签", measured["evidence"])
+        self.assertIn("音频未参与", unavailable["evidence"])
+
+    def test_audio_deadline_is_measured_from_request_ingress(self) -> None:
+        audio_app = create_app(_write_bundle(Path(self.directory.name) / "deadline-bundle"))
+        audio_client = TestClient(audio_app)
+        with patch.object(audio_app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)), patch(
+            "competition_emotion.service.acquire_request_audio", return_value=RequestAudioResult("unavailable")
+        ) as acquire, patch("competition_emotion.service.monotonic", return_value=100.0):
+            response = audio_client.post("/api/v1/emotion/recognize", json=self._request())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(acquire.call_args.kwargs["deadline_monotonic"], 125.0)
 
     def test_router_404_and_405_use_safe_protocol_envelopes(self) -> None:
         method_not_allowed = self.client.get("/api/v1/emotion/recognize")

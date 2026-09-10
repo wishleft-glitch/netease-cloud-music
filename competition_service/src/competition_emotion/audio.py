@@ -160,6 +160,8 @@ def decode_audio(
     ffmpeg_path: str = "ffmpeg",
     max_seconds: int = 45,
     sample_rate: int = 22050,
+    *,
+    timeout_seconds: float | None = None,
 ) -> tuple[np.ndarray, int]:
     """Decode a bounded mono float32 waveform through ffmpeg."""
     audio_path = Path(path)
@@ -171,6 +173,17 @@ def decode_audio(
         raise ValueError("sample_rate must be between 8000 and 48000")
     if not isinstance(ffmpeg_path, str) or not ffmpeg_path.strip():
         raise ValueError("ffmpeg_path must be nonblank")
+    if timeout_seconds is None:
+        process_timeout = float(max_seconds + 10)
+    elif (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not np.isfinite(float(timeout_seconds))
+        or float(timeout_seconds) <= 0.0
+    ):
+        raise ValueError("timeout_seconds must be positive")
+    else:
+        process_timeout = float(timeout_seconds)
     estimated_pcm_bytes = max_seconds * sample_rate * np.dtype(np.float32).itemsize
     if estimated_pcm_bytes > MAX_PCM_BYTES:
         raise ValueError("requested PCM output exceeds the maximum PCM byte limit")
@@ -200,7 +213,7 @@ def decode_audio(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=max_seconds + 10,
+            timeout=process_timeout,
         )
     except FileNotFoundError as error:
         raise RuntimeError("ffmpeg prerequisite is unavailable") from error
