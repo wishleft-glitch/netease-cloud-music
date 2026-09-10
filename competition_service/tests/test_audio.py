@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
 from competition_emotion.audio import (
     FEATURE_NAMES,
     MAX_PCM_BYTES,
+    _PinnedAsyncNetworkBackend,
+    _resolve_public_host,
     decode_audio,
     download_audio,
     feature_vector,
@@ -40,28 +43,64 @@ class DownloadAudioTests(unittest.TestCase):
         return [(2, 1, 6, "", ("93.184.216.34", 0))]
 
     @staticmethod
-    def stream_response(
-        chunks: tuple[bytes, ...] = (b"audio",), *, status_code: int = 200, location: str | None = None
+    def async_response(
+        chunks: tuple[bytes, ...] = (b"audio",), *, status_code: int = 200, location: str | None = None,
+        chunk_delay_seconds: float = 0.0,
     ) -> MagicMock:
         response = MagicMock()
         response.status_code = status_code
         response.headers = {} if location is None else {"Location": location}
-        response.iter_bytes.return_value = iter(chunks)
+
+        async def aiter_bytes() -> object:
+            for chunk in chunks:
+                if chunk_delay_seconds:
+                    await asyncio.sleep(chunk_delay_seconds)
+                yield chunk
+
+        response.aiter_bytes.side_effect = aiter_bytes
         return response
 
+    @staticmethod
+    def async_client(*responses: MagicMock, open_delay_seconds: float = 0.0) -> MagicMock:
+        client = MagicMock()
+        client.stream_calls = []
+
+        async def enter() -> MagicMock:
+            return client
+
+        async def exit(*_: object) -> None:
+            return None
+
+        client.__aenter__.side_effect = enter
+        client.__aexit__.side_effect = exit
+        queue = list(responses)
+
+        def stream(method: str, url: str) -> MagicMock:
+            client.stream_calls.append((method, url))
+            response = queue.pop(0)
+            context = MagicMock()
+
+            async def enter_response() -> MagicMock:
+                if open_delay_seconds:
+                    await asyncio.sleep(open_delay_seconds)
+                return response
+
+            async def exit_response(*_: object) -> None:
+                return None
+
+            context.__aenter__.side_effect = enter_response
+            context.__aexit__.side_effect = exit_response
+            return context
+
+        client.stream.side_effect = stream
+        return client
+
     def test_download_rejects_oversized_stream_and_keeps_existing_destination(self) -> None:
-        response = MagicMock()
-        response.status_code = 200
-        response.headers = {}
-        response.iter_bytes.return_value = iter((b"abc", b"def"))
-        context = MagicMock()
-        context.__enter__.return_value = response
+        client = self.async_client(self.async_response((b"abc", b"def")))
         with TemporaryDirectory() as directory:
             destination = Path(directory) / "track.bin"
             destination.write_bytes(b"old")
-            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
-                "competition_emotion.audio.httpx.stream", return_value=context
-            ):
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
                 with self.assertRaisesRegex(ValueError, "maximum"):
                     download_audio("https://example.test/music", destination, max_bytes=5)
 
@@ -73,73 +112,75 @@ class DownloadAudioTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "http"):
                 download_audio("file:///secret", Path(directory) / "track.bin")
 
-    def test_download_rejects_private_resolution_without_request(self) -> None:
-        private_and_public = [
+    def test_resolver_rejects_every_non_global_address_including_cgnat(self) -> None:
+        addresses = [
             (2, 1, 6, "", ("93.184.216.34", 0)),
-            (2, 1, 6, "", ("127.0.0.1", 0)),
+            (2, 1, 6, "", ("100.64.0.1", 0)),
         ]
-        with TemporaryDirectory() as directory:
-            with patch("competition_emotion.audio.socket.getaddrinfo", return_value=private_and_public), patch(
-                "competition_emotion.audio.httpx.stream"
-            ) as stream:
-                with self.assertRaisesRegex(ValueError, "public"):
-                    download_audio("https://localhost/music", Path(directory) / "track.bin")
-        stream.assert_not_called()
+        with patch("competition_emotion.audio.socket.getaddrinfo", return_value=addresses):
+            with self.assertRaisesRegex(ValueError, "global"):
+                _resolve_public_host("cdn.example.test", 443)
 
-    def test_redirect_target_is_validated_before_any_request(self) -> None:
-        source = self.stream_response(status_code=302, location="http://127.0.0.1/private")
-        context = MagicMock()
-        context.__enter__.return_value = source
-        with TemporaryDirectory() as directory:
-            with patch(
-                "competition_emotion.audio.socket.getaddrinfo",
-                side_effect=[self.public_resolution(), [(2, 1, 6, "", ("127.0.0.1", 0))]],
-            ), patch("competition_emotion.audio.httpx.stream", return_value=context) as stream:
-                with self.assertRaisesRegex(ValueError, "public"):
-                    download_audio("https://example.test/signed?token=abc", Path(directory) / "track.bin")
+    def test_pinned_connector_never_passes_a_hostname_to_the_socket_backend(self) -> None:
+        backend = _PinnedAsyncNetworkBackend()
+        with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch.object(
+            backend._backend, "connect_tcp", new_callable=AsyncMock
+        ) as connect_tcp:
+            asyncio.run(backend.connect_tcp("cdn.example.test", 443, timeout=1.0))
 
-        self.assertEqual(stream.call_count, 1)
-        self.assertEqual(stream.call_args.args[1], "https://example.test/signed?token=abc")
+        self.assertEqual(connect_tcp.await_args.args[:2], ("93.184.216.34", 443))
+
+    def test_pinned_connector_rejects_loopback_before_socket_connection(self) -> None:
+        backend = _PinnedAsyncNetworkBackend()
+        with patch(
+            "competition_emotion.audio.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 0))]
+        ), patch.object(backend._backend, "connect_tcp", new_callable=AsyncMock) as connect_tcp:
+            with self.assertRaisesRegex(ValueError, "global"):
+                asyncio.run(backend.connect_tcp("redirect.example.test", 443, timeout=1.0))
+
+        connect_tcp.assert_not_awaited()
 
     def test_redirect_without_location_is_rejected_even_at_redirect_limit(self) -> None:
-        contexts = []
-        for location in ("/one?signature=1", "/two?signature=2", "/three?signature=3", None):
-            context = MagicMock()
-            context.__enter__.return_value = self.stream_response(status_code=302, location=location)
-            contexts.append(context)
+        client = self.async_client(
+            *(self.async_response(status_code=302, location=location) for location in ("/one?signature=1", "/two?signature=2", "/three?signature=3", None))
+        )
 
         with TemporaryDirectory() as directory:
-            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
-                "competition_emotion.audio.httpx.stream", side_effect=contexts
-            ):
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
                 with self.assertRaisesRegex(ValueError, "missing Location"):
                     download_audio("https://example.test/music?signature=origin", Path(directory) / "track.bin")
 
+        self.assertEqual(client.stream_calls[1][1], "https://example.test/one?signature=1")
+
     def test_download_creates_nested_destination_parent(self) -> None:
-        response = self.stream_response()
-        context = MagicMock()
-        context.__enter__.return_value = response
+        client = self.async_client(self.async_response())
         with TemporaryDirectory() as directory:
             destination = Path(directory) / "new" / "nested" / "track.bin"
-            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
-                "competition_emotion.audio.httpx.stream", return_value=context
-            ):
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
                 result = download_audio("https://example.test/music", destination)
             self.assertEqual(result, destination)
             self.assertEqual(destination.read_bytes(), b"audio")
 
-    def test_download_enforces_total_deadline_across_chunks(self) -> None:
-        response = self.stream_response((b"a", b"b"))
-        context = MagicMock()
-        context.__enter__.return_value = response
+    def test_download_deadline_cancels_a_blocking_stream_open(self) -> None:
+        client = self.async_client(self.async_response(), open_delay_seconds=0.05)
         with TemporaryDirectory() as directory:
             destination = Path(directory) / "track.bin"
             destination.write_bytes(b"old")
-            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
-                "competition_emotion.audio.httpx.stream", return_value=context
-            ), patch("competition_emotion.audio.time.monotonic", side_effect=(0.0, 0.1, 0.2, 1.1)):
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
                 with self.assertRaisesRegex(TimeoutError, "total timeout"):
-                    download_audio("https://example.test/music", destination, timeout_seconds=1.0)
+                    download_audio("https://example.test/music", destination, timeout_seconds=0.01)
+
+            self.assertEqual(destination.read_bytes(), b"old")
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
+    def test_download_deadline_cancels_a_blocking_body_read(self) -> None:
+        client = self.async_client(self.async_response((b"audio",), chunk_delay_seconds=0.05))
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "track.bin"
+            destination.write_bytes(b"old")
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
+                with self.assertRaisesRegex(TimeoutError, "total timeout"):
+                    download_audio("https://example.test/music", destination, timeout_seconds=0.01)
 
             self.assertEqual(destination.read_bytes(), b"old")
             self.assertEqual(list(Path(directory).glob("*.tmp")), [])

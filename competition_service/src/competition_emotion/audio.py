@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 from pathlib import Path
 import socket
 import subprocess
 from tempfile import NamedTemporaryFile
-import time
 from typing import Mapping
 from urllib.parse import urljoin, urlsplit
 
+import httpcore
 import httpx
 import numpy as np
+from httpcore._backends.anyio import AnyIOBackend
+from httpcore._backends.base import AsyncNetworkBackend
 
 
 FEATURE_NAMES = (
@@ -25,13 +28,89 @@ MAX_PCM_BYTES = 16_000_000
 MAX_FEATURE_SECONDS = 45
 
 
+class _PinnedAsyncNetworkBackend(AsyncNetworkBackend):
+    """Resolve each hostname once and connect only to that checked numeric address."""
+
+    def __init__(self) -> None:
+        self._backend = AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object = None,
+    ) -> object:
+        address = await asyncio.to_thread(_resolve_public_host, host, port)
+        return await self._backend.connect_tcp(
+            address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, *args: object, **kwargs: object) -> object:
+        raise RuntimeError("Unix socket connections are not permitted for audio downloads")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+class _PinnedAsyncByteStream(httpx.AsyncByteStream):
+    def __init__(self, stream: object) -> None:
+        self._stream = stream
+
+    async def __aiter__(self) -> object:
+        async for chunk in self._stream:  # type: ignore[union-attr]
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()  # type: ignore[union-attr]
+
+
+class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
+    """HTTPX transport whose network backend pins DNS results for each connection."""
+
+    def __init__(self) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            max_keepalive_connections=0,
+            network_backend=_PinnedAsyncNetworkBackend(),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        core_response = await self._pool.handle_async_request(core_request)
+        return httpx.Response(
+            status_code=core_response.status,
+            headers=core_response.headers,
+            stream=_PinnedAsyncByteStream(core_response.stream),
+            extensions=core_response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
+
+
 def download_audio(
     url: str,
     destination: str | Path,
     max_bytes: int = 25_000_000,
     timeout_seconds: float = 12.0,
 ) -> Path:
-    """Download an HTTP(S) audio payload without replacing a prior file on failure."""
+    """Download a public HTTP(S) audio payload without replacing a prior file on failure."""
     if not isinstance(url, str) or not url.strip():
         raise ValueError("audio URL must be a nonblank http or https URL")
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
@@ -41,7 +120,6 @@ def download_audio(
 
     target = Path(destination)
     temporary_path: Path | None = None
-    deadline = time.monotonic() + timeout_seconds
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile(
@@ -52,36 +130,12 @@ def download_audio(
             suffix=".tmp",
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            total = 0
-            current_url = url
-            for redirects in range(MAX_REDIRECTS + 1):
-                _validate_public_http_url(current_url)
-                remaining = _remaining_download_time(deadline)
-                with httpx.stream(
-                    "GET", current_url, follow_redirects=False, timeout=remaining
-                ) as response:
-                    if 300 <= response.status_code < 400:
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise ValueError("audio redirect is missing Location")
-                        if redirects == MAX_REDIRECTS:
-                            raise ValueError("audio download exceeded redirect limit")
-                        current_url = urljoin(current_url, location)
-                        continue
-                    response.raise_for_status()
-                    for chunk in response.iter_bytes():
-                        _remaining_download_time(deadline)
-                        if not chunk:
-                            continue
-                        if total + len(chunk) > max_bytes:
-                            raise ValueError("audio download exceeds maximum size")
-                        temporary_file.write(chunk)
-                        total += len(chunk)
-                    break
-            else:
-                raise ValueError("audio download exceeded redirect limit")
-            if total == 0:
-                raise ValueError("audio download is empty")
+            _run_download_with_deadline(
+                url,
+                temporary_file,
+                max_bytes=max_bytes,
+                timeout_seconds=float(timeout_seconds),
+            )
         os.replace(temporary_path, target)
         return target
     except Exception:
@@ -231,7 +285,74 @@ def _bounded_stderr(stderr: bytes | str | None) -> str:
     return str(stderr)[:300]
 
 
-def _validate_public_http_url(url: str) -> None:
+def _run_download_with_deadline(
+    url: str,
+    temporary_file: object,
+    *,
+    max_bytes: int,
+    timeout_seconds: float,
+) -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(
+            _download_to_temporary_file(
+                url,
+                temporary_file,
+                max_bytes=max_bytes,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+        return
+    raise RuntimeError("download_audio cannot run inside an active event loop")
+
+
+async def _download_to_temporary_file(
+    url: str,
+    temporary_file: object,
+    *,
+    max_bytes: int,
+    timeout_seconds: float,
+) -> None:
+    total = 0
+    current_url = url
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async with httpx.AsyncClient(
+                transport=_PinnedAsyncTransport(),
+                follow_redirects=False,
+                timeout=None,
+                trust_env=False,
+            ) as client:
+                for redirects in range(MAX_REDIRECTS + 1):
+                    _validate_http_url(current_url)
+                    async with client.stream("GET", current_url) as response:
+                        if 300 <= response.status_code < 400:
+                            location = response.headers.get("Location")
+                            if not location:
+                                raise ValueError("audio redirect is missing Location")
+                            if redirects == MAX_REDIRECTS:
+                                raise ValueError("audio download exceeded redirect limit")
+                            current_url = urljoin(current_url, location)
+                            continue
+                        response.raise_for_status()
+                        async for chunk in response.aiter_bytes():
+                            if not chunk:
+                                continue
+                            if total + len(chunk) > max_bytes:
+                                raise ValueError("audio download exceeds maximum size")
+                            temporary_file.write(chunk)  # type: ignore[union-attr]
+                            total += len(chunk)
+                        break
+                else:
+                    raise ValueError("audio download exceeded redirect limit")
+    except TimeoutError as error:
+        raise TimeoutError("audio download exceeded total timeout") from error
+    if total == 0:
+        raise ValueError("audio download is empty")
+
+
+def _validate_http_url(url: str) -> None:
     try:
         parsed = urlsplit(url)
         host = parsed.hostname
@@ -245,6 +366,7 @@ def _validate_public_http_url(url: str) -> None:
         or parsed.password is not None
     ):
         raise ValueError("audio URL must be a valid public http or https URL")
+def _resolve_public_host(host: str, port: int | None) -> str:
     try:
         addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as error:
@@ -256,20 +378,6 @@ def _validate_public_http_url(url: str) -> None:
             resolved = ipaddress.ip_address(address[4][0])
         except (IndexError, ValueError) as error:
             raise ValueError("audio URL host resolved to an invalid address") from error
-        if (
-            resolved.is_loopback
-            or resolved.is_private
-            or resolved.is_link_local
-            or resolved.is_multicast
-            or resolved.is_reserved
-            or resolved.is_unspecified
-            or str(resolved) == "0.0.0.0"
-        ):
-            raise ValueError("audio URL host must resolve only to public addresses")
-
-
-def _remaining_download_time(deadline: float) -> float:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0.0:
-        raise TimeoutError("audio download exceeded total timeout")
-    return remaining
+        if not resolved.is_global:
+            raise ValueError("audio URL host must resolve only to global addresses")
+    return str(ipaddress.ip_address(addresses[0][4][0]))
