@@ -14,6 +14,7 @@
 /emotion_tagging/outputs/
 /competition/outputs/
 /competition/runs/
+/competition/audio_cache/
 /competition_service/build/
 *.log
 
