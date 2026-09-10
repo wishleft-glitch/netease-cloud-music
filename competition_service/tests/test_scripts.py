@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
+from unittest.mock import patch
+
+from competition_emotion import service
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = SERVICE_ROOT / "scripts"
 DOCS = SERVICE_ROOT.parents[0] / "docs"
+POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 
 
 def read(relative: Path) -> str:
@@ -27,6 +33,41 @@ class ServiceOperationsArtifactTests(unittest.TestCase):
         self.assertNotIn('default="127.0.0.1"', source)
         self.assertNotIn('default="localhost"', source)
 
+    def test_direct_service_cli_requires_a_nonloopback_ip_literal(self) -> None:
+        with patch.object(service, "create_app"), patch.object(service.uvicorn, "run"):
+            with self.assertRaises(SystemExit) as missing_host:
+                service.main(["--bundle-root", "bundle"])
+            with self.assertRaises(SystemExit) as loopback_host:
+                service.main(["--bundle-root", "bundle", "--host", "localhost"])
+            with self.assertRaises(SystemExit) as dns_host:
+                service.main(["--bundle-root", "bundle", "--host", "service.example.test"])
+
+        self.assertEqual(missing_host.exception.code, 2)
+        self.assertEqual(loopback_host.exception.code, 2)
+        self.assertEqual(dns_host.exception.code, 2)
+
+        with patch.object(service, "create_app") as create_app, patch.object(service.uvicorn, "run") as run:
+            service.main(["--bundle-root", "bundle", "--host", "0.0.0.0"])
+
+        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
+        self.assertEqual(create_app.call_args.args[0], Path("bundle"))
+
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise the launcher helper")
+    def test_powershell_option_parser_reads_the_launchers_quoted_host_and_port(self) -> None:
+        script_path = SCRIPTS / "start_service.ps1"
+        command = f'''$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile({str(script_path)!r}, [ref]$tokens, [ref]$errors)
+if ($errors.Count) {{ exit 2 }}
+$function = $ast.Find({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Get-CommandLineOptionValues" }}, $true)
+. ([ScriptBlock]::Create($function.Extent.Text))
+$line = '"-3.12" "-m" "competition_emotion.service" "--bundle-root" "C:\\Bundle Root" "--host" "10.20.30.40" "--port" "8000"'
+$hosts = @(Get-CommandLineOptionValues -CommandLine $line -Option "--host")
+$ports = @(Get-CommandLineOptionValues -CommandLine $line -Option "--port")
+if ($hosts.Count -ne 1 -or $hosts[0] -cne "10.20.30.40" -or $ports.Count -ne 1 -or $ports[0] -cne "8000") {{ exit 1 }}'''
+        result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", command], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_start_script_validates_bundle_and_keeps_proxy_out_of_logs_and_state(self) -> None:
         source = read(SCRIPTS / "start_service.ps1")
 
@@ -42,7 +83,15 @@ class ServiceOperationsArtifactTests(unittest.TestCase):
         self.assertIn("-ArgumentList $argumentLine", source)
         self.assertIn("Get-Process -Id $startedProcess.Id", source)
         self.assertIn("Move-Item -LiteralPath $temporaryStatePath -Destination $resolvedStateFile -Force", source)
+        self.assertIn("[switch]$ReplaceStaleState", source)
+        self.assertIn("Get-ExistingStateStatus", source)
+        self.assertIn("A live owned service state already exists", source)
+        self.assertIn("ReplaceStaleState", source)
+        self.assertIn("Get-CimInstance Win32_Process", source)
         self.assertRegex(source, r"\[ordered\]@\{[\s\S]*pid[\s\S]*bind_host[\s\S]*port[\s\S]*start_time_utc[\s\S]*bundle_root")
+        self.assertIn("CreationDate", source)
+        catch_block = source.rsplit("catch {", 1)[1]
+        self.assertIn("if ($statePublishedByThisInvocation)", catch_block)
         self.assertNotIn("audio_proxy_url", source.lower())
 
     def test_restart_script_refuses_untrusted_state_before_stopping_a_process(self) -> None:
@@ -55,6 +104,10 @@ class ServiceOperationsArtifactTests(unittest.TestCase):
         self.assertIn("Resolve-Path -LiteralPath $BundleRoot", source)
         self.assertIn("Stop-Process -Id $statePid -Force", source)
         self.assertLess(source.index("competition_emotion\\.service"), source.index("Stop-Process -Id $statePid -Force"))
+        self.assertIn("CreationDate", source)
+        self.assertIn('Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--host"', source)
+        self.assertIn('Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--port"', source)
+        self.assertIn("process creation time", source)
         self.assertIn("& $startScript", source)
 
     def test_environment_example_keeps_proxy_secret_empty_and_operator_supplied(self) -> None:

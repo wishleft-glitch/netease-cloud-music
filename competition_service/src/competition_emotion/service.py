@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass, field
+import ipaddress
 import json
 import math
 import os
@@ -497,7 +498,7 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve a trusted emotion-model bundle")
     parser.add_argument("--bundle-root", required=True, type=Path)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", required=True)
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--audio-proxy-url")
     parser.add_argument("--audio-allowed-host", action="append", default=None)
@@ -505,6 +506,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--audio-budget-seconds", default=20.0, type=float)
     parser.add_argument("--max-concurrent-audio", default=4, type=int)
     arguments = parser.parse_args(argv)
+    try:
+        host_address = ipaddress.ip_address(arguments.host)
+    except ValueError:
+        parser.error("--host must be a non-loopback IP literal")
+    if host_address.is_loopback:
+        parser.error("--host must be a non-loopback IP literal")
     if not 1 <= arguments.port <= 65_535:
         parser.error("--port must be between 1 and 65535")
     if arguments.audio_proxy_url is not None and not arguments.audio_allowed_host:

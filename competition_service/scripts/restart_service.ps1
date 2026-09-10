@@ -15,6 +15,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-NormalizedProcessCreationTime {
+    param($Process)
+
+    if ($null -eq $Process -or $null -eq $Process.CreationDate) {
+        return $null
+    }
+    try {
+        return ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o")
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-CommandLineOptionValues {
+    param([string]$CommandLine, [string]$Option)
+
+    $pattern = '(?i)(?:^|\s)"?' + [regex]::Escape($Option) + '"?\s+(?:"(?<value>[^"]+)"|(?<value>\S+))'
+    return @([regex]::Matches($CommandLine, $pattern) | ForEach-Object { $_.Groups["value"].Value })
+}
+
 if (-not (Test-Path -LiteralPath $BundleRoot -PathType Container)) {
     throw "BundleRoot must be an existing directory."
 }
@@ -43,12 +64,18 @@ if (($actualKeys -join ",") -ne (($expectedKeys | Sort-Object) -join ",") -or
     throw "Invalid state schema. Refusing to stop any process."
 }
 try {
+    $normalizedStateTime = ([DateTime]::Parse(
+        $state.start_time_utc,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )).ToUniversalTime().ToString("o")
     $stateBundleRoot = (Resolve-Path -LiteralPath $state.bundle_root).Path
 }
 catch {
     throw "Invalid state schema. Refusing to stop any process."
 }
-if ($stateBundleRoot -ne $resolvedBundleRoot -or $state.bind_host -ne $BindHost -or $state.port -ne $Port) {
+if ($normalizedStateTime -cne $state.start_time_utc -or
+    $stateBundleRoot -cne $resolvedBundleRoot -or $state.bind_host -cne $BindHost -or $state.port -ne $Port) {
     throw "State does not match the requested nonsecret service settings. Refusing to stop any process."
 }
 
@@ -58,19 +85,24 @@ if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.CommandLine) -o
     $process.CommandLine -notmatch "(?i)competition_emotion\.service") {
     throw "State PID is not the expected service process. Refusing to stop any process."
 }
-$bundleMatch = [regex]::Match($process.CommandLine, '(?i)(?:^|\s)--bundle-root\s+(?:"(?<bundle>[^"]+)"|(?<bundle>\S+))')
-if (-not $bundleMatch.Success) {
-    throw "State PID has no readable bundle root. Refusing to stop any process."
+$commandBundleRoots = @(Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--bundle-root")
+$commandHosts = @(Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--host")
+$commandPorts = @(Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--port")
+if ($commandBundleRoots.Count -ne 1 -or $commandHosts.Count -ne 1 -or $commandPorts.Count -ne 1) {
+    throw "State PID command line is ambiguous. Refusing to stop any process."
 }
-$commandBundleRoot = $bundleMatch.Groups["bundle"].Value
 try {
-    $resolvedCommandBundleRoot = (Resolve-Path -LiteralPath $commandBundleRoot).Path
+    $resolvedCommandBundleRoot = (Resolve-Path -LiteralPath $commandBundleRoots[0]).Path
 }
 catch {
     throw "State PID bundle root cannot be verified. Refusing to stop any process."
 }
-if ($resolvedCommandBundleRoot -ne $resolvedBundleRoot) {
+if ($resolvedCommandBundleRoot -cne $resolvedBundleRoot -or
+    $commandHosts[0] -cne $state.bind_host -or $commandPorts[0] -cne ([string]$state.port)) {
     throw "State PID does not own the requested bundle root. Refusing to stop any process."
+}
+if ((Get-NormalizedProcessCreationTime -Process $process) -cne $state.start_time_utc) {
+    throw "State PID process creation time does not match. Refusing to stop any process."
 }
 
 Stop-Process -Id $statePid -Force

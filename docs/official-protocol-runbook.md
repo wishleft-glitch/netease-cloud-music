@@ -15,7 +15,7 @@ Direct audio mode resolves and accepts only security-pinned public addresses. Pr
 3. From the repository checkout, install the service package and its locked dependencies: `py -3.12 -m pip install -e .\\competition_service`.
 4. Copy `competition_service\\scripts\\service.env.example` to an operator-managed location. Put any proxy URL in a secret store or the process environment; never commit it.
 5. Train or provision a validated immutable bundle. Confirm the chosen `BundleRoot` contains a regular `current.json` file and its active version contains `model.joblib` and `report.json`.
-6. Choose a nonloopback IP literal that is routed and protected by the host or network firewall. `127.0.0.1`, `::1`, and `localhost` are rejected by the launcher. Passing `0.0.0.0` is allowed only when the operator explicitly supplies it.
+6. Choose a nonloopback IP literal that is routed and protected by the host or network firewall. `127.0.0.1`, `::1`, and `localhost` are rejected by both the launcher and direct Python CLI. `--host` is required by the Python CLI; it has no default. Passing `0.0.0.0` is allowed only when the operator explicitly supplies it.
 
 Start a service on a private interface. Substitute the actual bundle path, IP, and allowlisted hosts:
 
@@ -31,7 +31,7 @@ Start a service on a private interface. Substitute the actual bundle path, IP, a
   -MaxConcurrentAudio 4
 ```
 
-The launcher starts a hidden child process, creates `logs\\service` under the bundle root, and atomically writes `service-state.json` only after the PID is present. The state file contains only PID, bind host, port, start time, and bundle root. It never stores the proxy URL or request URLs.
+The launcher starts a hidden child process, creates `logs\\service` under the bundle root, and atomically writes `service-state.json` only after the PID and its machine-parseable process creation time are present. The state file contains only PID, bind host, port, start time, and bundle root. It never stores the proxy URL or request URLs. A live owned state file blocks a second start. A stale or invalid state requires an operator review and an explicit `-ReplaceStaleState` on the next start; launch failures never remove a pre-existing state file.
 
 Health-check locally from an authorized management host:
 
@@ -56,7 +56,7 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `AudioBudgetSeconds` | Per-request audio budget | Greater than 0 and no more than 25; default 20. |
 | `MaxConcurrentAudio` | Non-queuing audio capacity | Positive integer; tune using saturation data. |
 
-Restart with the same explicit nonsecret settings. The restart script reads the state file but refuses to stop a PID unless the process command line identifies `competition_emotion.service` and the normalized bundle root matches the explicit `BundleRoot`.
+Restart with the same explicit nonsecret settings. The restart script reads the state file but refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, host, and port argument, and its Windows process creation time matches the recorded start time.
 
 ```powershell
 & .\\competition_service\\scripts\\restart_service.ps1 `

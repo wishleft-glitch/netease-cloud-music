@@ -6,6 +6,7 @@ param(
     [string]$BindHost,
     [int]$Port = 8000,
     [string]$StateFile,
+    [switch]$ReplaceStaleState,
     [string]$AudioProxyUrl,
     [string[]]$AudioAllowedHost,
     [string]$AudioTempRoot,
@@ -93,8 +94,77 @@ function ConvertTo-WindowsCommandLineArgument {
     return $builder.ToString()
 }
 
+function Get-NormalizedProcessCreationTime {
+    param($Process)
+
+    if ($null -eq $Process -or $null -eq $Process.CreationDate) {
+        return $null
+    }
+    try {
+        return ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o")
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-CommandLineOptionValues {
+    param([string]$CommandLine, [string]$Option)
+
+    $pattern = '(?i)(?:^|\s)"?' + [regex]::Escape($Option) + '"?\s+(?:"(?<value>[^"]+)"|(?<value>\S+))'
+    return @([regex]::Matches($CommandLine, $pattern) | ForEach-Object { $_.Groups["value"].Value })
+}
+
+function Get-ExistingStateStatus {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return "Absent"
+    }
+    try {
+        $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $expectedKeys = @("pid", "bind_host", "port", "start_time_utc", "bundle_root")
+        $actualKeys = @($state.PSObject.Properties.Name | Sort-Object)
+        if (($actualKeys -join ",") -ne (($expectedKeys | Sort-Object) -join ",") -or
+            $state.pid -isnot [long] -or $state.port -isnot [long] -or
+            $state.bind_host -isnot [string] -or $state.bundle_root -isnot [string] -or
+            $state.start_time_utc -isnot [string] -or $state.pid -lt 1 -or
+            $state.port -lt 1 -or $state.port -gt 65535) {
+            return "StaleOrInvalid"
+        }
+        $normalizedStateTime = ([DateTime]::Parse(
+            $state.start_time_utc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )).ToUniversalTime().ToString("o")
+        if ($normalizedStateTime -cne $state.start_time_utc) {
+            return "StaleOrInvalid"
+        }
+        $stateRoot = (Resolve-Path -LiteralPath $state.bundle_root).Path
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$state.pid)"
+        if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.CommandLine) -or
+            $process.CommandLine -notmatch "(?i)competition_emotion\.service") {
+            return "StaleOrInvalid"
+        }
+        $commandBundleRoots = @(Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--bundle-root")
+        $commandHosts = @(Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--host")
+        $commandPorts = @(Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--port")
+        if ($commandBundleRoots.Count -ne 1 -or $commandHosts.Count -ne 1 -or $commandPorts.Count -ne 1 -or
+            (Resolve-Path -LiteralPath $commandBundleRoots[0]).Path -cne $stateRoot -or
+            $commandHosts[0] -cne $state.bind_host -or $commandPorts[0] -cne ([string]$state.port) -or
+            (Get-NormalizedProcessCreationTime -Process $process) -cne $state.start_time_utc) {
+            return "StaleOrInvalid"
+        }
+        return "LiveOwned"
+    }
+    catch {
+        return "StaleOrInvalid"
+    }
+}
+
 $startedProcess = $null
 $resolvedStateFile = $null
+$statePublishedByThisInvocation = $false
 try {
     if (-not ($Port -is [int]) -or $Port -lt 1 -or $Port -gt 65535) {
         throw "Port must be an integer between 1 and 65535."
@@ -124,6 +194,16 @@ try {
         throw "StateFile must include a directory."
     }
     New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+    $existingStateStatus = Get-ExistingStateStatus -Path $resolvedStateFile
+    if ($existingStateStatus -eq "LiveOwned") {
+        throw "A live owned service state already exists. Refusing to overwrite it."
+    }
+    if ($existingStateStatus -eq "StaleOrInvalid") {
+        if (-not $ReplaceStaleState) {
+            throw "State file is stale or invalid. Re-run with -ReplaceStaleState after operator review."
+        }
+        Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
+    }
 
     $logDirectory = Join-Path $resolvedBundleRoot "logs\\service"
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -157,18 +237,24 @@ try {
     if ($null -eq $verifiedProcess -or $verifiedProcess.HasExited) {
         throw "Service process exited before state publication. Inspect the service logs."
     }
+    $processMetadata = Get-CimInstance Win32_Process -Filter "ProcessId = $startedProcess.Id"
+    $processCreationTimeUtc = Get-NormalizedProcessCreationTime -Process $processMetadata
+    if ([string]::IsNullOrWhiteSpace($processCreationTimeUtc)) {
+        throw "Service process creation time could not be verified before state publication."
+    }
 
     $state = [ordered]@{
         pid = $startedProcess.Id
         bind_host = $BindHost
         port = $Port
-        start_time_utc = [DateTime]::UtcNow.ToString("o")
+        start_time_utc = $processCreationTimeUtc
         bundle_root = $resolvedBundleRoot
     }
     $temporaryStatePath = Join-Path $stateDirectory ("." + [System.IO.Path]::GetFileName($resolvedStateFile) + "." + [Guid]::NewGuid().ToString("N") + ".tmp")
     try {
         [System.IO.File]::WriteAllText($temporaryStatePath, ($state | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $temporaryStatePath -Destination $resolvedStateFile -Force
+        $statePublishedByThisInvocation = $true
     }
     finally {
         Remove-Item -LiteralPath $temporaryStatePath -Force -ErrorAction SilentlyContinue
@@ -179,9 +265,9 @@ try {
 }
 catch {
     if ($null -ne $startedProcess) {
-        Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -InputObject $startedProcess -Force -ErrorAction SilentlyContinue
     }
-    if ($null -ne $resolvedStateFile) {
+    if ($statePublishedByThisInvocation) {
         Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction SilentlyContinue
     }
     throw
