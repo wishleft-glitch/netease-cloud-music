@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
+import hashlib
 from pathlib import Path
-import re
 
 import pandas as pd
 
 from .constants import LABEL_SET
+from .lyrics import clean_lyric, compose_lyrics
 from .types import Song
 
 
@@ -22,19 +23,10 @@ REQUIRED_COLUMNS = (
     "lrc歌词（滚词）",
     "翻译歌词",
 )
-_TIMESTAMP = re.compile(r"\[\d{1,3}:\d{2}(?:\.\d+)?\]")
-_WHITESPACE = re.compile(r"\s+")
-
-
 def _clean_string(value: object) -> str:
     if value is None or pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def clean_lyric(value: object) -> str:
-    """Remove LRC timestamps and normalize lyric whitespace."""
-    return _WHITESPACE.sub(" ", _TIMESTAMP.sub("", _clean_string(value))).strip()
 
 
 def _song_sort_key(song_id: str) -> tuple[int, Decimal | str, str]:
@@ -49,6 +41,20 @@ def _song_sort_key(song_id: str) -> tuple[int, Decimal | str, str]:
 
 def _song_text(parts: Iterable[str]) -> str:
     return " ".join(part for part in parts if part)
+
+
+def workbook_provenance(path: Path) -> dict[str, object]:
+    """Return the minimum reproducible provenance for an official workbook."""
+    digest = hashlib.sha256()
+    with path.open("rb") as workbook:
+        for chunk in iter(lambda: workbook.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return {
+        "file_name": path.name,
+        "sha256": digest.hexdigest(),
+        "rows": len(pd.read_excel(path)),
+    }
 
 
 def load_official_songs(path: Path) -> list[Song]:
@@ -82,16 +88,16 @@ def load_official_songs(path: Path) -> list[Song]:
 
         name = _clean_string(row["歌曲名称"])
         artists = _clean_string(row["演唱艺人"])
-        lyric = clean_lyric(row["文本歌词"])
-        lrc = clean_lyric(row["lrc歌词（滚词）"])
-        translation = clean_lyric(row["翻译歌词"])
+        lyrics = compose_lyrics(
+            row["文本歌词"], row["lrc歌词（滚词）"], row["翻译歌词"]
+        )
         songs_by_id[song_id] = Song(
             song_id=song_id,
             labels=frozenset({label}),
             name=name,
             artists=artists,
             genre=_clean_string(row["一级曲风标签"]),
-            text=_song_text((name, artists, lyric, lrc, translation)),
+            text=_song_text((name, artists, lyrics)),
             audio_url=_clean_string(row["音频下载地址"]),
         )
 
