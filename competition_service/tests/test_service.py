@@ -135,6 +135,53 @@ class ServiceTests(unittest.TestCase):
         self.assertGreaterEqual(response.json()["data"]["cost_ms"], 0)
         self.assertLessEqual(response.json()["data"]["cost_ms"], elapsed_ms + 100)
 
+    def test_router_404_and_405_use_safe_protocol_envelopes(self) -> None:
+        method_not_allowed = self.client.get("/api/v1/emotion/recognize")
+        self.assertEqual(method_not_allowed.status_code, 405)
+        self.assertEqual(
+            method_not_allowed.json(),
+            {"code": 405, "message": "method not allowed"},
+        )
+        self.assertNotIn("detail", method_not_allowed.json())
+
+        not_found = self.client.get("/missing")
+        self.assertEqual(not_found.status_code, 404)
+        self.assertEqual(not_found.json(), {"code": 404, "message": "not found"})
+        self.assertNotIn("detail", not_found.json())
+
+    def test_cost_ms_starts_at_body_middleware_ingress(self) -> None:
+        payload = json.dumps(self._request(), ensure_ascii=False).encode("utf-8")
+        sent: list[dict[str, object]] = []
+        clock = {"value": 100.0}
+
+        async def receive() -> dict[str, object]:
+            clock["value"] = 100.25
+            return {"type": "http.request", "body": payload, "more_body": False}
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        scope: dict[str, object] = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/v1/emotion/recognize",
+            "raw_path": b"/api/v1/emotion/recognize",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+        with patch.object(self.app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)), patch(
+            "competition_emotion.service.perf_counter", side_effect=lambda: clock["value"]
+        ):
+            asyncio.run(self.client.app(scope, receive, send))
+
+        body = json.loads(sent[1]["body"])
+        self.assertEqual(body["data"]["cost_ms"], 250)
+
     def test_top_two_ties_follow_configured_label_order(self) -> None:
         with patch.object(
             self.app.state.runtime.scorer,

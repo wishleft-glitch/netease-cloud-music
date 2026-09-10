@@ -15,7 +15,6 @@ from typing import Any, Sequence
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from starlette.datastructures import Headers
@@ -35,6 +34,7 @@ from .types import Song
 _MAX_POINTER_BYTES = 64 * 1024
 _MAX_REPORT_BYTES = 1024 * 1024
 MAX_REQUEST_BODY_BYTES = 110_000
+_REQUEST_STARTED_AT_SCOPE_KEY = "competition_emotion.request_started_at"
 
 
 class RecognizeRequest(BaseModel):
@@ -113,6 +113,7 @@ class _RequestBodyLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        scope[_REQUEST_STARTED_AT_SCOPE_KEY] = perf_counter()
         content_length = Headers(scope=scope).get("content-length")
         if content_length is not None:
             try:
@@ -308,12 +309,19 @@ def create_app(bundle_root: Path) -> FastAPI:
     async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid request"})
 
+    @app.exception_handler(StarletteHTTPException)
+    async def protocol_http_error(_: Request, error: StarletteHTTPException) -> JSONResponse:
+        message = {
+            404: "not found",
+            405: "method not allowed",
+        }.get(error.status_code, "request failed")
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"code": error.status_code, "message": message},
+        )
+
     @app.exception_handler(Exception)
-    async def internal_service_error(request: Request, error: Exception) -> JSONResponse:
-        if isinstance(error, RequestValidationError):
-            return await invalid_request(request, error)
-        if isinstance(error, StarletteHTTPException):
-            return await http_exception_handler(request, error)
+    async def internal_service_error(_: Request, __: Exception) -> JSONResponse:
         return JSONResponse(
             status_code=500,
             content={"code": 500, "message": "internal service error"},
@@ -329,8 +337,8 @@ def create_app(bundle_root: Path) -> FastAPI:
         )
 
     @app.post("/api/v1/emotion/recognize", response_model=RecognizeResponse)
-    def recognize(request: RecognizeRequest) -> RecognizeResponse:
-        started_at = perf_counter()
+    def recognize(request: RecognizeRequest, http_request: Request) -> RecognizeResponse:
+        started_at = http_request.scope[_REQUEST_STARTED_AT_SCOPE_KEY]
         lyric_text = compose_lyrics(
             request.text_lyric, request.lrc_lyric, request.lrc_translation
         )
