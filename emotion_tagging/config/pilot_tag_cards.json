@@ -1,0 +1,60 @@
+[
+  {
+    "name": "热血",
+    "audio": {
+      "min_valence": 0.55,
+      "min_arousal": 0.72
+    },
+    "lyrics": {
+      "includes": ["fight", "rise", "stronger", "warrior", "battle"],
+      "excludes": []
+    },
+    "requires_human_review": true
+  },
+  {
+    "name": "活力",
+    "audio": {
+      "min_valence": 0.55,
+      "min_arousal": 0.65
+    },
+    "lyrics": {
+      "includes": [],
+      "excludes": []
+    },
+    "requires_human_review": true
+  },
+  {
+    "name": "治愈",
+    "audio": {
+      "min_valence": 0.65,
+      "min_arousal": 0.25,
+      "max_arousal": 0.60
+    },
+    "lyrics": {
+      "includes": ["heal", "peace", "home", "safe", "hold on"],
+      "excludes": []
+    },
+    "requires_human_review": true
+  },
+  {
+    "name": "思念",
+    "audio": {},
+    "lyrics": {
+      "includes": ["miss you", "missing you", "without you", "come back", "remember"],
+      "excludes": []
+    },
+    "requires_human_review": true
+  },
+  {
+    "name": "孤独",
+    "audio": {
+      "max_valence": 0.35,
+      "max_arousal": 0.45
+    },
+    "lyrics": {
+      "includes": ["lonely", "alone", "nobody", "empty"],
+      "excludes": []
+    },
+    "requires_human_review": true
+  }
+]

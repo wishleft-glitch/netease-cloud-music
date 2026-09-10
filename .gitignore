@@ -1,0 +1,25 @@
+# Source data and licensed audio
+/PMEmo/
+/competition/data/
+
+# Downloaded or trained model assets
+/models/
+/artifacts/
+*.onnx
+*.pt
+*.pth
+*.bin
+
+# Generated runtime and experiment outputs
+/emotion_tagging/outputs/
+/competition/outputs/
+/competition/runs/
+*.log
+
+# Python and local environment files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
