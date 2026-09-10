@@ -227,6 +227,67 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertIn("音频未参与", second.json()["data"]["evidence"])
 
+    def test_audio_capacity_is_shared_by_all_event_loops_for_one_app(self) -> None:
+        audio_app = create_app(
+            _write_bundle(Path(self.directory.name) / "shared-capacity-bundle"),
+            audio_config=ServiceAudioConfig(max_concurrent_audio=1),
+        )
+
+        async def acquire_from_this_loop() -> object:
+            return audio_app.state.audio_capacity.try_acquire()
+
+        first = asyncio.run(acquire_from_this_loop())
+        second = asyncio.run(acquire_from_this_loop())
+        self.assertIs(first, True)
+        self.assertIs(second, False)
+        audio_app.state.audio_capacity.release()
+
+    def test_cancelled_request_keeps_audio_capacity_until_worker_finishes(self) -> None:
+        audio_app = create_app(
+            _write_bundle(Path(self.directory.name) / "cancel-capacity-bundle"),
+            audio_config=ServiceAudioConfig(max_concurrent_audio=1),
+        )
+        entered = Event()
+        release = Event()
+        capacity = audio_app.state.audio_capacity
+
+        def blocking_audio(*_: object, **__: object) -> RequestAudioResult:
+            entered.set()
+            release.wait(timeout=2)
+            return RequestAudioResult("measured", {"rms_db": -3.0})
+
+        async def exercise() -> tuple[httpx.Response, httpx.Response, int]:
+            transport = httpx.ASGITransport(app=audio_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                with patch.object(audio_app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)), patch(
+                    "competition_emotion.service.acquire_request_audio", side_effect=blocking_audio
+                ) as acquire, patch.object(capacity, "release", wraps=capacity.release) as returned:
+                    first = asyncio.create_task(client.post("/api/v1/emotion/recognize", json=self._request()))
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    first.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await first
+                    second = await asyncio.wait_for(
+                        client.post("/api/v1/emotion/recognize", json=self._request(song_id="second")), timeout=0.5
+                    )
+                    self.assertEqual(acquire.call_count, 1)
+                    self.assertIn("音频未参与", second.json()["data"]["evidence"])
+                    release.set()
+                    for _ in range(50):
+                        if returned.call_count == 1:
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertEqual(returned.call_count, 1)
+                    third = await asyncio.wait_for(
+                        client.post("/api/v1/emotion/recognize", json=self._request(song_id="third")), timeout=1
+                    )
+            return second, third, acquire.call_count
+
+        second, third, calls = asyncio.run(exercise())
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(third.status_code, 200)
+        self.assertEqual(calls, 2)
+
     def test_router_404_and_405_use_safe_protocol_envelopes(self) -> None:
         method_not_allowed = self.client.get("/api/v1/emotion/recognize")
         self.assertEqual(method_not_allowed.status_code, 405)

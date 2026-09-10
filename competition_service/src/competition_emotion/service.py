@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 from numbers import Real
 import stat
+from threading import BoundedSemaphore
 from time import monotonic, perf_counter
 from typing import Any, Sequence
 from urllib.parse import urlsplit
@@ -137,26 +138,30 @@ _DEFAULT_SERVICE_AUDIO_CONFIG = ServiceAudioConfig()
 
 
 class _AudioCapacityController:
-    """A non-queuing audio permit pool owned by one application instance."""
+    """A non-queuing audio permit pool shared by every loop in one app."""
 
     def __init__(self, maximum: int) -> None:
-        self._maximum = maximum
-        self._semaphores: dict[asyncio.AbstractEventLoop, asyncio.BoundedSemaphore] = {}
+        self._semaphore = BoundedSemaphore(maximum)
 
-    async def try_acquire(self) -> asyncio.BoundedSemaphore | None:
-        loop = asyncio.get_running_loop()
-        semaphore = self._semaphores.get(loop)
-        if semaphore is None:
-            semaphore = asyncio.BoundedSemaphore(self._maximum)
-            self._semaphores[loop] = semaphore
-        if semaphore.locked():
-            return None
-        await semaphore.acquire()
-        return semaphore
+    def try_acquire(self) -> bool:
+        return self._semaphore.acquire(blocking=False)
 
-    @staticmethod
-    def release(semaphore: asyncio.BoundedSemaphore) -> None:
-        semaphore.release()
+    def release(self) -> None:
+        self._semaphore.release()
+
+
+def _release_audio_capacity(capacity: _AudioCapacityController):
+    """Create the one completion callback that returns a held audio permit."""
+
+    def release_when_done(task: asyncio.Task[RequestAudioResult]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+        finally:
+            capacity.release()
+
+    return release_when_done
 
 
 class _RequestBodyLimitMiddleware:
@@ -436,19 +441,24 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
             request_started_at = http_request.scope[_REQUEST_MONOTONIC_STARTED_AT_SCOPE_KEY]
             request_deadline = request_started_at + float(audio_config.request_deadline_seconds)
             capacity = app.state.audio_capacity
-            lease = await capacity.try_acquire()
-            if lease is not None:
+            if capacity.try_acquire():
                 try:
-                    audio_result = await asyncio.to_thread(
-                        acquire_request_audio,
-                        request.audio_url,
-                        audio_config.request_config,
-                        deadline_monotonic=request_deadline,
+                    audio_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            acquire_request_audio,
+                            request.audio_url,
+                            audio_config.request_config,
+                            deadline_monotonic=request_deadline,
+                        )
                     )
+                    audio_task.add_done_callback(_release_audio_capacity(capacity))
+                except BaseException:
+                    capacity.release()
+                    raise
+                try:
+                    audio_result = await asyncio.shield(audio_task)
                 except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError):
                     audio_result = RequestAudioResult("unavailable")
-                finally:
-                    capacity.release(lease)
         evidence = build_evidence(
             lyric_used=lyric_used,
             title_used=not lyric_used,
