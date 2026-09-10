@@ -136,8 +136,10 @@ class TextScorerTests(unittest.TestCase):
             expected = self.scorer.score("一个人孤独没有你")
 
             save_text_scorer(self.scorer, path)
+            saved_payload = joblib.load(path)
             loaded = load_text_scorer(path, trusted=True)
 
+            self.assertEqual(saved_payload["schema_version"], 2)
             self.assertEqual(loaded.labels, LABELS)
             np.testing.assert_allclose(
                 list(loaded.score("一个人孤独没有你").values()),
@@ -166,7 +168,7 @@ class TextScorerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "malformed.joblib"
             base_payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "labels": LABELS,
                 "trained_labels": LABELS,
                 "label_order_sha256": label_order_digest(LABELS),
@@ -174,7 +176,7 @@ class TextScorerTests(unittest.TestCase):
                 "classifier": self.scorer.classifier,
             }
             invalid_payloads = (
-                ({"schema_version": 2}, "schema"),
+                ({"schema_version": 3}, "schema"),
                 (
                     {
                         **base_payload,
@@ -215,6 +217,14 @@ class TextScorerTests(unittest.TestCase):
 
                     with self.assertRaisesRegex(ValueError, message):
                         load_text_scorer(path, trusted=True)
+
+    def test_load_rejects_v1_payload_with_migration_guidance(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-v1.joblib"
+            joblib.dump({"schema_version": 1}, path)
+
+            with self.assertRaisesRegex(ValueError, "migration|retrain"):
+                load_text_scorer(path, trusted=True)
 
     def test_project_metadata_contains_all_runtime_requirements(self) -> None:
         package_root = Path(__file__).resolve().parents[1]

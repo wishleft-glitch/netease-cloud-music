@@ -17,7 +17,7 @@ from sklearn.utils.validation import check_is_fitted
 from .types import Song
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _EMPTY_TEXT_SENTINEL = "[no_text]"
 
 
@@ -186,7 +186,13 @@ def load_text_scorer(path: str | Path, *, trusted: bool = False) -> TextScorer:
         record: Any = joblib.load(Path(path))
     except Exception as error:
         raise ValueError("invalid text scorer payload") from error
-    if not isinstance(record, dict) or record.get("schema_version") != _SCHEMA_VERSION:
+    if not isinstance(record, dict):
+        raise ValueError("unsupported text scorer schema")
+    if record.get("schema_version") == 1:
+        raise ValueError(
+            "schema version 1 is incompatible with bound model artifacts; retrain the scorer"
+        )
+    if record.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError("unsupported text scorer schema")
     required = {
         "labels",
