@@ -196,7 +196,8 @@ class ServiceTests(unittest.TestCase):
             ):
                 response = failing_client.post("/api/v1/emotion/recognize", json=self._request())
             self.assertEqual(response.status_code, 500)
-            self.assertNotIn("invalid scores", response.text)
+            self.assertEqual(response.headers["content-type"], "application/json")
+            self.assertEqual(response.json(), {"code": 500, "message": "internal service error"})
 
     def test_body_limit_has_official_413_envelope_for_declared_and_chunked_requests(self) -> None:
         oversized = b" " * (MAX_REQUEST_BODY_BYTES + 1)

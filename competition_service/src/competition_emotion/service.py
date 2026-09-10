@@ -15,9 +15,11 @@ from typing import Any, Sequence
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from starlette.datastructures import Headers
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 import uvicorn
 import numpy as np
@@ -300,6 +302,17 @@ def create_app(bundle_root: Path) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
         return JSONResponse(status_code=400, content={"code": 400, "message": "invalid request"})
+
+    @app.exception_handler(Exception)
+    async def internal_service_error(request: Request, error: Exception) -> JSONResponse:
+        if isinstance(error, RequestValidationError):
+            return await invalid_request(request, error)
+        if isinstance(error, StarletteHTTPException):
+            return await http_exception_handler(request, error)
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "message": "internal service error"},
+        )
 
     @app.get("/healthz", response_model=HealthResponse)
     def healthz() -> HealthResponse:
