@@ -503,6 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--audio-allowed-host", action="append", default=None)
     parser.add_argument("--audio-temp-root", type=Path)
     parser.add_argument("--audio-budget-seconds", default=20.0, type=float)
+    parser.add_argument("--max-concurrent-audio", default=4, type=int)
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65_535:
         parser.error("--port must be between 1 and 65535")
@@ -522,7 +523,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     uvicorn.run(
         create_app(
             arguments.bundle_root,
-            audio_config=ServiceAudioConfig(request_config=request_audio_config),
+            audio_config=ServiceAudioConfig(
+                request_config=request_audio_config,
+                max_concurrent_audio=arguments.max_concurrent_audio,
+            ),
         ),
         host=arguments.host,
         port=arguments.port,
