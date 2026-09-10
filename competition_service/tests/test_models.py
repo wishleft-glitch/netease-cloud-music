@@ -74,20 +74,14 @@ class TextScorerTests(unittest.TestCase):
 
         self.assertEqual(scores.shape, (0, len(LABELS)))
 
-    def test_single_label_configuration_trains_on_all_positive_records(self) -> None:
-        scorer = TextScorer().fit(
-            [
-                song("1", {"孤独"}, "一个人", "一个人 孤独"),
-                song("2", {"孤独"}, "空房间", "寂寞 夜晚"),
-            ],
-            ("孤独",),
-        )
+    def test_single_label_configuration_rejects_missing_real_negatives(self) -> None:
+        songs = [
+            song("1", {"孤独"}, "一个人", "一个人 孤独"),
+            song("2", {"孤独"}, "空房间", "寂寞 夜晚"),
+        ]
 
-        scores = scorer.score_many(["一个人孤独没有你"])
-
-        self.assertEqual(scores.shape, (1, 1))
-        self.assertEqual(tuple(scorer.score("一个人孤独没有你")), ("孤独",))
-        self.assertTrue(np.isfinite(scores[0, 0]) and 0.0 <= scores[0, 0] <= 1.0)
+        with self.assertRaisesRegex(ValueError, "one-label.*real negatives"):
+            TextScorer().fit(songs, ("孤独",))
 
     def test_fit_rejects_labels_with_only_one_class(self) -> None:
         songs = [

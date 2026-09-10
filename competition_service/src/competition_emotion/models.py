@@ -6,7 +6,6 @@ from typing import Any
 
 import joblib
 import numpy as np
-from scipy.sparse import vstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
@@ -61,17 +60,18 @@ class TextScorer:
                 "songs contain labels outside the configuration: "
                 + ", ".join(sorted(map(str, unknown_labels)))
             )
+        if len(configured_labels) == 1:
+            raise ValueError(
+                "a one-label configuration cannot provide real negatives"
+            )
 
         encoder = MultiLabelBinarizer(classes=configured_labels)
         targets = encoder.fit_transform([song.labels for song in songs])
-        if len(configured_labels) == 1:
-            unsupported = [] if targets[:, 0].any() else [configured_labels[0]]
-        else:
-            unsupported = [
-                label
-                for index, label in enumerate(configured_labels)
-                if not targets[:, index].any() or targets[:, index].all()
-            ]
+        unsupported = [
+            label
+            for index, label in enumerate(configured_labels)
+            if not targets[:, index].any() or targets[:, index].all()
+        ]
         if unsupported:
             raise ValueError(
                 "labels require both positive and negative training examples: "
@@ -93,14 +93,7 @@ class TextScorer:
                 solver="liblinear",
             )
         )
-        training_features = features
-        training_targets = targets
-        if len(configured_labels) == 1 and targets[:, 0].all():
-            training_features = vstack(
-                [features, vectorizer.transform([_EMPTY_TEXT_SENTINEL])]
-            )
-            training_targets = np.vstack([targets, [[0]]])
-        classifier.fit(training_features, training_targets)
+        classifier.fit(features, targets)
 
         self.labels = configured_labels
         self.vectorizer = vectorizer
