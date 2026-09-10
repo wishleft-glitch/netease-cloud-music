@@ -60,6 +60,51 @@ class HoldoutTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     make_holdout(self.songs, test_ratio=ratio, seed=7)
 
+    def test_rejects_empty_and_duplicate_song_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty"):
+            make_holdout([], test_ratio=0.15, seed=7)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            make_holdout(
+                [song("1", "狂欢"), song("1", "孤独")],
+                test_ratio=0.15,
+                seed=7,
+            )
+
+    def test_uses_python_rounding_for_holdout_size(self) -> None:
+        songs = [song(str(index), "狂欢") for index in range(10)]
+
+        assignment = make_holdout(songs, test_ratio=0.15, seed=7)
+
+        self.assertEqual(len(assignment.test_ids), 2)
+
+    def test_balanced_fixture_covers_every_label_when_feasible(self) -> None:
+        songs = [
+            song("a1", "A"),
+            song("a2", "A"),
+            song("a3", "A"),
+            song("a4", "A"),
+            song("a5", "A"),
+            song("b1", "B"),
+            song("b2", "B"),
+            song("b3", "B"),
+            song("b4", "B"),
+            song("b5", "B"),
+        ]
+
+        assignment = make_holdout(songs, test_ratio=0.2, seed=7)
+        by_id = {item.song_id: item for item in songs}
+        test_labels = set().union(*(by_id[song_id].labels for song_id in assignment.test_ids))
+
+        self.assertEqual(test_labels, {"A", "B"})
+
+    def test_stated_seeds_produce_distinct_assignments_on_crafted_fixture(self) -> None:
+        songs = [song(str(index), "A") for index in range(10)]
+
+        first = make_holdout(songs, test_ratio=0.2, seed=7)
+        second = make_holdout(songs, test_ratio=0.2, seed=8)
+
+        self.assertNotEqual(first, second)
+
 
 class MetricReportTests(unittest.TestCase):
     def test_reports_top_one_metrics_and_singleton_confusion_matrix(self) -> None:
@@ -113,6 +158,56 @@ class MetricReportTests(unittest.TestCase):
                 np.array([[1, 0]]),
                 np.array([[0.8, 0.2]]),
                 ("狂欢",),
+            )
+
+    def test_rejects_non_finite_metric_values_before_prediction(self) -> None:
+        for bad_value in (np.nan, np.inf, -np.inf):
+            with self.subTest(matrix="y_true", value=bad_value):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    metric_report(
+                        np.array([[1.0, bad_value]]),
+                        np.array([[0.8, 0.2]]),
+                        ("狂欢", "孤独"),
+                    )
+            with self.subTest(matrix="scores", value=bad_value):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    metric_report(
+                        np.array([[1.0, 0.0]]),
+                        np.array([[0.8, bad_value]]),
+                        ("狂欢", "孤独"),
+                    )
+
+    def test_rejects_non_binary_or_non_numeric_truth_values(self) -> None:
+        for bad_value in (-1, 0.5, 2):
+            with self.subTest(value=bad_value):
+                with self.assertRaisesRegex(ValueError, "binary"):
+                    metric_report(
+                        np.array([[1, bad_value]]),
+                        np.array([[0.8, 0.2]]),
+                        ("狂欢", "孤独"),
+                    )
+        with self.assertRaisesRegex(ValueError, "numeric"):
+            metric_report(
+                np.array([["1", "0"]]),
+                np.array([[0.8, 0.2]]),
+                ("狂欢", "孤独"),
+            )
+
+    def test_rejects_empty_duplicate_or_blank_labels(self) -> None:
+        for labels in ((), ("狂欢", "狂欢"), ("狂欢", ""), ("狂欢", "  ")):
+            with self.subTest(labels=labels):
+                columns = len(labels)
+                with self.assertRaisesRegex(ValueError, "labels"):
+                    metric_report(
+                        np.zeros((1, columns)),
+                        np.zeros((1, columns)),
+                        labels,
+                    )
+        with self.assertRaisesRegex(ValueError, "labels"):
+            metric_report(
+                np.array([[1, 0]]),
+                np.array([[0.8, 0.2]]),
+                ("狂欢", 1),
             )
 
 

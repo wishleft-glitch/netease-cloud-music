@@ -12,6 +12,8 @@ def make_holdout(
     """Create a deterministic song-level holdout with greedy label coverage."""
     if not 0.05 <= test_ratio < 0.5:
         raise ValueError("test_ratio must be between 0.05 (inclusive) and 0.5 (exclusive)")
+    if not songs:
+        raise ValueError("songs cannot be empty")
 
     song_ids = [song.song_id for song in songs]
     if len(song_ids) != len(set(song_ids)):
