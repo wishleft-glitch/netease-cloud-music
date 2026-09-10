@@ -53,6 +53,7 @@ def workbook_snapshot(path: Path) -> Iterator[tuple[Path, dict[str, object]]]:
     source_path = Path(path)
     digest = hashlib.sha256()
     snapshot_path: Path | None = None
+    primary_error = False
     try:
         with source_path.open("rb") as workbook:
             if not stat.S_ISREG(os.fstat(workbook.fileno()).st_mode):
@@ -71,9 +72,16 @@ def workbook_snapshot(path: Path) -> Iterator[tuple[Path, dict[str, object]]]:
             "rows": len(pd.read_excel(snapshot_path)),
         }
         yield snapshot_path, provenance
+    except BaseException:
+        primary_error = True
+        raise
     finally:
         if snapshot_path is not None:
-            snapshot_path.unlink(missing_ok=True)
+            try:
+                snapshot_path.unlink(missing_ok=True)
+            except OSError:
+                if not primary_error:
+                    raise
 
 
 def workbook_provenance(path: Path) -> dict[str, object]:

@@ -226,6 +226,60 @@ class OfficialSongLoaderTests(unittest.TestCase):
                 raise RuntimeError("test failure")
         self.assertFalse(failed_snapshot.exists())
 
+    def test_workbook_snapshot_preserves_body_error_when_cleanup_fails(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "1",
+                    "情绪类型": "平静",
+                    "歌曲名称": "original",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            ]
+        )
+
+        snapshot_path: Path | None = None
+        try:
+            with patch("competition_emotion.data.Path.unlink", side_effect=OSError("cleanup failure")):
+                with self.assertRaisesRegex(ValueError, "body failure"):
+                    with workbook_snapshot(path) as (snapshot_path, _):
+                        raise ValueError("body failure")
+        finally:
+            if snapshot_path is not None:
+                snapshot_path.unlink(missing_ok=True)
+
+    def test_workbook_snapshot_reports_cleanup_error_after_success(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "1",
+                    "情绪类型": "平静",
+                    "歌曲名称": "original",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            ]
+        )
+
+        snapshot_path: Path | None = None
+        try:
+            with patch("competition_emotion.data.Path.unlink", side_effect=OSError("cleanup failure")):
+                with self.assertRaisesRegex(OSError, "cleanup failure"):
+                    with workbook_snapshot(path) as (snapshot_path, _):
+                        self.assertTrue(snapshot_path.is_file())
+        finally:
+            if snapshot_path is not None:
+                snapshot_path.unlink(missing_ok=True)
+
     def test_none_lyrics_produce_valid_metadata_text(self) -> None:
         path = self.write_workbook(
             [

@@ -36,8 +36,9 @@ percentage as an evaluation result.
 
 Measured from the formal run on 2026-09-11:
 
-- Active bundle: `versions/03f5ce0338204b8586b09794a24e4401`
-- Active report: `F:\netease\_music\competition\runs\official-20260910\versions\03f5ce0338204b8586b09794a24e4401\report.json`
+- Current report resolver: `F:\netease\_music\competition\runs\official-20260910\current.json` → `active_bundle` → `<BundleRoot>\<active_bundle>\report.json`
+- Observed active bundle for this run: `versions/3f46bab4daca4465a68098b5b8297c5b`
+- Observed report for this run: `F:\netease\_music\competition\runs\official-20260910\versions\3f46bab4daca4465a68098b5b8297c5b\report.json`
 - Source file name: `emotion_songs_20260910.xlsx`
 - Source SHA-256: `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`
 - Source raw rows: 5,894
