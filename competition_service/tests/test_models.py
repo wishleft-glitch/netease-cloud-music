@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import tomllib
 import unittest
+from unittest.mock import patch
 
 import joblib
 import numpy as np
@@ -19,6 +23,11 @@ from competition_emotion.types import Song
 
 
 LABELS = ("狂欢", "孤独")
+
+
+def label_order_digest(labels: tuple[str, ...]) -> str:
+    canonical = json.dumps(list(labels), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def song(song_id: str, labels: set[str], name: str, text: str) -> Song:
@@ -127,7 +136,7 @@ class TextScorerTests(unittest.TestCase):
             expected = self.scorer.score("一个人孤独没有你")
 
             save_text_scorer(self.scorer, path)
-            loaded = load_text_scorer(path)
+            loaded = load_text_scorer(path, trusted=True)
 
             self.assertEqual(loaded.labels, LABELS)
             np.testing.assert_allclose(
@@ -135,15 +144,40 @@ class TextScorerTests(unittest.TestCase):
                 list(expected.values()),
             )
 
+    def test_load_requires_explicit_trust_before_deserializing(self) -> None:
+        with patch("competition_emotion.models.joblib.load") as mocked_load:
+            with self.assertRaisesRegex(ValueError, "joblib artifacts must be trusted"):
+                load_text_scorer("untrusted.joblib")
+
+        mocked_load.assert_not_called()
+
+    def test_load_rejects_reordered_labels(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "reordered.joblib"
+            save_text_scorer(self.scorer, path)
+            payload = joblib.load(path)
+            payload["labels"] = tuple(reversed(LABELS))
+            joblib.dump(payload, path)
+
+            with self.assertRaisesRegex(ValueError, "trained_labels"):
+                load_text_scorer(path, trusted=True)
+
     def test_load_rejects_malformed_payload(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "malformed.joblib"
+            base_payload = {
+                "schema_version": 1,
+                "labels": LABELS,
+                "trained_labels": LABELS,
+                "label_order_sha256": label_order_digest(LABELS),
+                "vectorizer": self.scorer.vectorizer,
+                "classifier": self.scorer.classifier,
+            }
             invalid_payloads = (
                 ({"schema_version": 2}, "schema"),
                 (
                     {
-                        "schema_version": 1,
-                        "labels": LABELS,
+                        **base_payload,
                         "vectorizer": TfidfVectorizer(),
                         "classifier": OneVsRestClassifier(LogisticRegression()),
                     },
@@ -151,19 +185,26 @@ class TextScorerTests(unittest.TestCase):
                 ),
                 (
                     {
-                        "schema_version": 1,
+                        **base_payload,
                         "labels": list(LABELS),
-                        "vectorizer": self.scorer.vectorizer,
-                        "classifier": self.scorer.classifier,
                     },
                     "labels",
                 ),
                 (
                     {
-                        "schema_version": 1,
-                        "labels": ("狂欢",),
-                        "vectorizer": self.scorer.vectorizer,
-                        "classifier": self.scorer.classifier,
+                        **base_payload,
+                        "label_order_sha256": "0" * 64,
+                    },
+                    "label_order_sha256",
+                ),
+                (
+                    {
+                        **base_payload,
+                        "labels": ("狂欢", "孤独", "额外"),
+                        "trained_labels": ("狂欢", "孤独", "额外"),
+                        "label_order_sha256": label_order_digest(
+                            ("狂欢", "孤独", "额外")
+                        ),
                     },
                     "components",
                 ),
@@ -173,7 +214,18 @@ class TextScorerTests(unittest.TestCase):
                     joblib.dump(payload, path)
 
                     with self.assertRaisesRegex(ValueError, message):
-                        load_text_scorer(path)
+                        load_text_scorer(path, trusted=True)
+
+    def test_project_metadata_contains_all_runtime_requirements(self) -> None:
+        package_root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((package_root / "pyproject.toml").read_text(encoding="utf-8"))
+        requirements = {
+            line.strip()
+            for line in (package_root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+
+        self.assertEqual(set(project["project"]["dependencies"]), requirements)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,13 @@ def _text_or_sentinel(value: object) -> str:
 def _song_text(song: Song) -> str:
     text = _text_or_sentinel(song.text)
     return text if text != _EMPTY_TEXT_SENTINEL else _text_or_sentinel(song.name)
+
+
+def _label_order_sha256(labels: tuple[str, ...]) -> str:
+    canonical = json.dumps(
+        list(labels), ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 @dataclass
@@ -151,10 +160,13 @@ class TextScorer:
 
 def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
     vectorizer, classifier = scorer._fitted_components()
+    trained_labels = tuple(scorer.labels)
     joblib.dump(
         {
             "schema_version": _SCHEMA_VERSION,
-            "labels": scorer.labels,
+            "labels": trained_labels,
+            "trained_labels": trained_labels,
+            "label_order_sha256": _label_order_sha256(trained_labels),
             "vectorizer": vectorizer,
             "classifier": classifier,
         },
@@ -162,23 +174,46 @@ def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
     )
 
 
-def load_text_scorer(path: str | Path) -> TextScorer:
+def load_text_scorer(path: str | Path, *, trusted: bool = False) -> TextScorer:
+    """Load a scorer only after the caller explicitly trusts its joblib artifact.
+
+    Joblib deserializes pickle data, so callers must set ``trusted=True`` only
+    for artifacts from a source they trust.
+    """
+    if not trusted:
+        raise ValueError("joblib artifacts must be trusted; pass trusted=True")
     try:
         record: Any = joblib.load(Path(path))
     except Exception as error:
         raise ValueError("invalid text scorer payload") from error
     if not isinstance(record, dict) or record.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError("unsupported text scorer schema")
-    required = {"labels", "vectorizer", "classifier"}
+    required = {
+        "labels",
+        "trained_labels",
+        "label_order_sha256",
+        "vectorizer",
+        "classifier",
+    }
     if not required.issubset(record):
         raise ValueError("text scorer payload is missing required components")
     raw_labels = record["labels"]
-    if not isinstance(raw_labels, tuple):
+    raw_trained_labels = record["trained_labels"]
+    if not isinstance(raw_labels, tuple) or not isinstance(raw_trained_labels, tuple):
         raise ValueError("text scorer payload has invalid labels")
     try:
         labels = _validate_labels(raw_labels)
+        trained_labels = _validate_labels(raw_trained_labels)
     except (TypeError, ValueError) as error:
         raise ValueError("text scorer payload has invalid labels") from error
+    if labels != trained_labels:
+        raise ValueError("payload labels must exactly match trained_labels")
+    label_order_sha256 = record["label_order_sha256"]
+    if (
+        not isinstance(label_order_sha256, str)
+        or label_order_sha256 != _label_order_sha256(trained_labels)
+    ):
+        raise ValueError("label_order_sha256 does not match trained_labels")
     vectorizer = record["vectorizer"]
     classifier = record["classifier"]
     if not isinstance(vectorizer, TfidfVectorizer) or not isinstance(classifier, OneVsRestClassifier):
