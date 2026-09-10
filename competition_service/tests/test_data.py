@@ -179,6 +179,29 @@ class OfficialSongLoaderTests(unittest.TestCase):
 
         self.assertEqual([song.song_id for song in load_official_songs(path)], ["2", "10"])
 
+    def test_sorts_special_song_ids_without_crashing(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": song_id,
+                    "情绪类型": "平静",
+                    "歌曲名称": song_id,
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+                for song_id in ("sNaN", "NaN", "Infinity", "1", "10")
+            ]
+        )
+
+        songs = load_official_songs(path)
+
+        self.assertEqual(
+            [song.song_id for song in songs], ["1", "10", "Infinity", "NaN", "sNaN"]
+        )
 
 if __name__ == "__main__":
     unittest.main()

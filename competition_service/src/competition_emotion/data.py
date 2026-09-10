@@ -39,9 +39,12 @@ def clean_lyric(value: object) -> str:
 
 def _song_sort_key(song_id: str) -> tuple[int, Decimal | str, str]:
     try:
-        return (0, Decimal(song_id), song_id)
-    except InvalidOperation:
+        numeric_id = Decimal(song_id)
+    except (InvalidOperation, ValueError):
         return (1, song_id, song_id)
+    if not numeric_id.is_finite() or numeric_id != numeric_id.to_integral_value():
+        return (1, song_id, song_id)
+    return (0, numeric_id, song_id)
 
 
 def _song_text(parts: Iterable[str]) -> str:
@@ -50,7 +53,9 @@ def _song_text(parts: Iterable[str]) -> str:
 
 def load_official_songs(path: Path) -> list[Song]:
     """Load official rows, combining labels that belong to the same song."""
-    frame = pd.read_excel(path, dtype={"歌曲id": "string"})
+    frame = pd.read_excel(
+        path, dtype={"歌曲id": "string"}, keep_default_na=False
+    )
     missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"Missing required source columns: {', '.join(missing)}")
