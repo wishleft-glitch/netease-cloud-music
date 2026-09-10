@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -118,14 +120,77 @@ class OfficialSongLoaderTests(unittest.TestCase):
 
         provenance = workbook_provenance(path)
 
-        import hashlib
-
         self.assertEqual(provenance["file_name"], "official_songs.xlsx")
         self.assertEqual(
             provenance["sha256"], hashlib.sha256(path.read_bytes()).hexdigest()
         )
         self.assertEqual(provenance["rows"], 2)
         self.assertEqual(set(provenance), {"file_name", "sha256", "rows"})
+
+    def test_workbook_provenance_uses_one_snapshot_when_source_is_replaced(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "1",
+                    "情绪类型": "平静",
+                    "歌曲名称": "original",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            ]
+        )
+        expected_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        replacement = path.with_name("replacement.xlsx")
+        pd.DataFrame(
+            [
+                {
+                    "歌曲id": "2",
+                    "情绪类型": "欢快",
+                    "歌曲名称": "replacement one",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                },
+                {
+                    "歌曲id": "3",
+                    "情绪类型": "活力",
+                    "歌曲名称": "replacement two",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                },
+            ],
+            columns=REQUIRED_COLUMNS,
+        ).to_excel(replacement, index=False)
+        original_read_excel = pd.read_excel
+        replaced = False
+
+        def replace_source_before_read(snapshot_path: object, *args: object, **kwargs: object) -> pd.DataFrame:
+            nonlocal replaced
+            if not replaced:
+                replacement.replace(path)
+                replaced = True
+            return original_read_excel(snapshot_path, *args, **kwargs)
+
+        with patch(
+            "competition_emotion.data.pd.read_excel",
+            side_effect=replace_source_before_read,
+        ):
+            provenance = workbook_provenance(path)
+
+        self.assertTrue(replaced)
+        self.assertEqual(provenance["sha256"], expected_sha256)
+        self.assertEqual(provenance["rows"], 1)
 
     def test_none_lyrics_produce_valid_metadata_text(self) -> None:
         path = self.write_workbook(

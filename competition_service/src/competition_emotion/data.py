@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 import hashlib
+import os
 from pathlib import Path
+import stat
+from tempfile import NamedTemporaryFile
 
 import pandas as pd
 
@@ -45,16 +48,29 @@ def _song_text(parts: Iterable[str]) -> str:
 
 def workbook_provenance(path: Path) -> dict[str, object]:
     """Return the minimum reproducible provenance for an official workbook."""
+    source_path = Path(path)
     digest = hashlib.sha256()
-    with path.open("rb") as workbook:
-        for chunk in iter(lambda: workbook.read(1024 * 1024), b""):
-            digest.update(chunk)
+    snapshot_path: Path | None = None
+    try:
+        with source_path.open("rb") as workbook:
+            if not stat.S_ISREG(os.fstat(workbook.fileno()).st_mode):
+                raise ValueError("Official workbook must be a regular file")
+            with NamedTemporaryFile(
+                mode="wb", suffix=source_path.suffix, delete=False
+            ) as snapshot:
+                snapshot_path = Path(snapshot.name)
+                for chunk in iter(lambda: workbook.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    snapshot.write(chunk)
 
-    return {
-        "file_name": path.name,
-        "sha256": digest.hexdigest(),
-        "rows": len(pd.read_excel(path)),
-    }
+        return {
+            "file_name": source_path.name,
+            "sha256": digest.hexdigest(),
+            "rows": len(pd.read_excel(snapshot_path)),
+        }
+    finally:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
 
 
 def load_official_songs(path: Path) -> list[Song]:
