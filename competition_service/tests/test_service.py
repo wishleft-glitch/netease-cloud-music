@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory
+from time import perf_counter
 import unittest
 from unittest.mock import patch
 
@@ -54,74 +55,157 @@ def _write_bundle(root: Path) -> Path:
 
 
 class ServiceTests(unittest.TestCase):
-    def test_health_and_recognition_contract_with_configured_tie_order(self) -> None:
-        with TemporaryDirectory() as directory:
-            app = create_app(_write_bundle(Path(directory) / "bundle"))
-            client = TestClient(app)
+    def setUp(self) -> None:
+        self.directory = TemporaryDirectory()
+        self.app = create_app(_write_bundle(Path(self.directory.name) / "bundle"))
+        self.client = TestClient(self.app)
 
-            health = client.get("/healthz")
-            self.assertEqual(health.status_code, 200)
-            self.assertEqual(
-                health.json(),
-                {"ready": True, "model_type": "lyrics_tfidf_logreg", "model_version": "test-v1", "label_count": 2},
-            )
+    def tearDown(self) -> None:
+        self.directory.cleanup()
 
-            response = client.post(
+    def _request(self, **overrides: object) -> dict[str, object]:
+        request: dict[str, object] = {
+            "audio_url": "https://example.test/audio.mp3",
+            "song_name": "新歌",
+            "song_id": "abc",
+            "artists": "歌手",
+        }
+        request.update(overrides)
+        return request
+
+    def test_health_and_official_recognition_envelope_with_rounding_and_tie_order(self) -> None:
+        health = self.client.get("/healthz")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(
+            health.json(),
+            {"ready": True, "model_type": "lyrics_tfidf_logreg", "model_version": "test-v1", "label_count": 2},
+        )
+
+        with patch.object(
+            self.app.state.runtime.scorer,
+            "score",
+            return_value={"狂欢": 0.123456, "孤独": 0.123455},
+        ):
+            started = perf_counter()
+            response = self.client.post(
                 "/api/v1/emotion/recognize",
-                json={"song_id": "abc", "title": "新歌", "artists": "歌手", "genre": "流行", "lyrics": "任意"},
+                json=self._request(text_lyric="任意歌词"),
             )
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(set(response.json()), {"song_id", "emotion_label", "confidence", "model_type", "model_version"})
-            self.assertEqual(response.json()["song_id"], "abc")
-            self.assertIn(response.json()["emotion_label"], LABELS)
-            self.assertTrue(0.0 <= response.json()["confidence"] <= 1.0)
+            elapsed_ms = (perf_counter() - started) * 1000
 
-            with patch.object(app.state.runtime.scorer, "score", return_value={"孤独": 0.5, "狂欢": 0.5}):
-                tied = client.post("/api/v1/emotion/recognize", json={"title": "同分"})
-            self.assertEqual(tied.status_code, 200)
-            self.assertEqual(tied.json()["emotion_label"], "狂欢")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "code": 200,
+                "data": {
+                    "top_emotion": "狂欢",
+                    "top_confidence": 0.1235,
+                    "second_emotion": "孤独",
+                    "second_confidence": 0.1235,
+                    "evidence": "基于歌曲名称、艺人及可用歌词文本进行情绪判定。",
+                    "cost_ms": response.json()["data"]["cost_ms"],
+                },
+                "error": "",
+            },
+        )
+        self.assertIsInstance(response.json()["data"]["cost_ms"], int)
+        self.assertGreaterEqual(response.json()["data"]["cost_ms"], 0)
+        self.assertLessEqual(response.json()["data"]["cost_ms"], elapsed_ms + 100)
 
-    def test_invalid_request_uses_standard_validation_errors(self) -> None:
-        with TemporaryDirectory() as directory:
-            client = TestClient(create_app(_write_bundle(Path(directory) / "bundle")))
-            self.assertEqual(client.post("/api/v1/emotion/recognize", json={"title": "  "}).status_code, 422)
-            self.assertEqual(client.post("/api/v1/emotion/recognize", json={"title": 7}).status_code, 422)
-            self.assertEqual(client.post("/api/v1/emotion/recognize", json={"title": "ok", "extra": "no"}).status_code, 422)
-            self.assertEqual(client.post("/api/v1/emotion/recognize", json={"title": "x" * 301}).status_code, 422)
+    def test_top_two_ties_follow_configured_label_order(self) -> None:
+        with patch.object(
+            self.app.state.runtime.scorer,
+            "score",
+            return_value={"孤独": 0.5, "狂欢": 0.5},
+        ):
+            response = self.client.post("/api/v1/emotion/recognize", json=self._request())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["top_emotion"], "狂欢")
+        self.assertEqual(response.json()["data"]["second_emotion"], "孤独")
+        self.assertEqual(response.json()["data"]["top_confidence"], 0.5)
+        self.assertEqual(response.json()["data"]["second_confidence"], 0.5)
 
-    def test_body_limit_rejects_declared_and_misreported_oversized_payloads(self) -> None:
-        with TemporaryDirectory() as directory:
-            client = TestClient(create_app(_write_bundle(Path(directory) / "bundle")))
-            oversized = b" " * (MAX_REQUEST_BODY_BYTES + 1)
-            self.assertEqual(
-                client.post("/api/v1/emotion/recognize", content=oversized).status_code,
-                413,
-            )
-            # The counting receive wrapper also applies when there is no
-            # Content-Length header at all, as in a chunked request.
-            sent: list[dict[str, object]] = []
+    def test_uses_song_name_as_model_text_only_when_composed_lyrics_are_empty(self) -> None:
+        with patch.object(self.app.state.runtime.scorer, "score", return_value={"狂欢": 0.8, "孤独": 0.2}) as score:
+            response = self.client.post("/api/v1/emotion/recognize", json=self._request())
+        self.assertEqual(response.status_code, 200)
+        score.assert_called_once_with("新歌")
+        self.assertEqual(response.json()["data"]["evidence"], "仅基于歌曲名称和艺人元数据进行情绪判定。")
 
-            async def receive() -> dict[str, object]:
-                return {"type": "http.request", "body": oversized, "more_body": False}
+    def test_request_validation_has_official_400_envelope(self) -> None:
+        malformed = (
+            {},
+            self._request(audio_url="ftp://example.test/a.mp3"),
+            self._request(song_name="  "),
+            self._request(song_id=""),
+            self._request(artists=7),
+            self._request(extra="no"),
+            {"song_id": "abc", "title": "old", "lyrics": "old", "audio_url": "https://example.test/a.mp3"},
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                response = self.client.post("/api/v1/emotion/recognize", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json(), {"code": 400, "message": "invalid request"})
 
-            async def send(message: dict[str, object]) -> None:
-                sent.append(message)
+        malformed_json = self.client.post(
+            "/api/v1/emotion/recognize",
+            content=b'{"audio_url":',
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(malformed_json.status_code, 400)
+        self.assertEqual(malformed_json.json(), {"code": 400, "message": "invalid request"})
 
-            scope: dict[str, object] = {
-                "type": "http",
-                "asgi": {"version": "3.0"},
-                "http_version": "1.1",
-                "method": "POST",
-                "scheme": "http",
-                "path": "/api/v1/emotion/recognize",
-                "raw_path": b"/api/v1/emotion/recognize",
-                "query_string": b"",
-                "headers": [(b"content-type", b"application/json")],
-                "client": ("testclient", 50000),
-                "server": ("testserver", 80),
-            }
-            asyncio.run(client.app(scope, receive, send))
-            self.assertEqual(sent[0]["status"], 413)
+    def test_rejects_invalid_scores_before_selecting_a_winner(self) -> None:
+        failing_client = TestClient(self.app, raise_server_exceptions=False)
+        invalid_results = (
+            {"狂欢": float("nan"), "孤独": float("nan")},
+            {"狂欢": 0.8, "孤独": True},
+            {"狂欢": 0.8, "孤独": np.bool_(True)},
+            {"狂欢": 0.8, "孤独": 1.1},
+            {"狂欢": 0.8, "孤独": -0.1},
+        )
+        for scores in invalid_results:
+            with self.subTest(scores=repr(scores)), patch.object(
+                self.app.state.runtime.scorer,
+                "score",
+                return_value=scores,
+            ):
+                response = failing_client.post("/api/v1/emotion/recognize", json=self._request())
+            self.assertEqual(response.status_code, 500)
+            self.assertNotIn("invalid scores", response.text)
+
+    def test_body_limit_has_official_413_envelope_for_declared_and_chunked_requests(self) -> None:
+        oversized = b" " * (MAX_REQUEST_BODY_BYTES + 1)
+        response = self.client.post("/api/v1/emotion/recognize", content=oversized)
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json(), {"code": 413, "message": "request body too large"})
+
+        sent: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": oversized, "more_body": False}
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        scope: dict[str, object] = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/v1/emotion/recognize",
+            "raw_path": b"/api/v1/emotion/recognize",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+        asyncio.run(self.client.app(scope, receive, send))
+        self.assertEqual(sent[0]["status"], 413)
+        self.assertEqual(json.loads(sent[1]["body"]), {"code": 413, "message": "request body too large"})
 
     def test_corrupted_or_malicious_pointer_is_refused_at_initialization(self) -> None:
         with TemporaryDirectory() as directory:
@@ -204,20 +288,6 @@ class ServiceTests(unittest.TestCase):
                     create_app(root)
             self.assertTrue(replaced)
             loader.assert_not_called()
-
-    def test_invalid_nonwinning_scores_are_rejected_before_ranking(self) -> None:
-        with TemporaryDirectory() as directory:
-            app = create_app(_write_bundle(Path(directory) / "bundle"))
-            client = TestClient(app, raise_server_exceptions=False)
-            for invalid in (float("nan"), True, np.bool_(True)):
-                with self.subTest(invalid=repr(invalid)), patch.object(
-                    app.state.runtime.scorer,
-                    "score",
-                    return_value={"狂欢": 0.8, "孤独": invalid},
-                ):
-                    response = client.post("/api/v1/emotion/recognize", json={"title": "验证"})
-                self.assertEqual(response.status_code, 500)
-                self.assertNotIn("invalid scores", response.text)
 
 
 if __name__ == "__main__":

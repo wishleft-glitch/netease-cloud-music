@@ -10,9 +10,12 @@ import os
 from pathlib import Path, PurePosixPath
 from numbers import Real
 import stat
+from time import perf_counter
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
@@ -20,6 +23,8 @@ import uvicorn
 import numpy as np
 
 from .models import TextScorer, load_text_scorer
+from .evidence import build_evidence
+from .lyrics import compose_lyrics
 from .train import BUNDLE_POINTER_SCHEMA_VERSION, MODEL_TYPE, REPORT_SCHEMA_VERSION
 from .types import Song
 
@@ -30,32 +35,52 @@ MAX_REQUEST_BODY_BYTES = 110_000
 
 
 class RecognizeRequest(BaseModel):
-    """The bounded, text-only inference payload."""
+    """The bounded official synchronous-recognition payload."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    song_id: StrictStr | None = Field(default=None, max_length=300)
-    title: StrictStr = Field(max_length=300)
+    audio_url: StrictStr = Field(max_length=1024)
+    song_name: StrictStr = Field(max_length=200)
+    song_id: StrictStr = Field(max_length=200)
+    album_name: StrictStr | None = Field(default=None, max_length=200)
     artists: StrictStr | None = Field(default=None, max_length=500)
-    genre: StrictStr | None = Field(default=None, max_length=200)
-    lyrics: StrictStr | None = Field(default=None, max_length=100_000)
+    text_lyric: StrictStr | None = Field(default=None, max_length=5000)
+    lrc_lyric: StrictStr | None = Field(default=None, max_length=5000)
+    lrc_translation: StrictStr | None = Field(default=None, max_length=5000)
 
-    @field_validator("title")
+    @field_validator("audio_url", "song_name", "song_id")
     @classmethod
-    def title_must_not_be_blank(cls, value: str) -> str:
+    def required_string_must_not_be_blank(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("title must not be blank")
+            raise ValueError("required field must not be blank")
         return value
+
+    @field_validator("audio_url")
+    @classmethod
+    def audio_url_must_be_http_or_https(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("audio_url must be an http or https URL")
+        return value
+
+
+class RecognizeData(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    top_emotion: str
+    top_confidence: float
+    second_emotion: str
+    second_confidence: float
+    evidence: str = Field(max_length=500)
+    cost_ms: int = Field(ge=0)
 
 
 class RecognizeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    song_id: str | None
-    emotion_label: str
-    confidence: float
-    model_type: str
-    model_version: str
+    code: int
+    data: RecognizeData
+    error: str
 
 
 class HealthResponse(BaseModel):
@@ -123,7 +148,7 @@ class _RequestBodyLimitMiddleware:
     @staticmethod
     async def _too_large(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await JSONResponse(
-            status_code=413, content={"detail": "Request body too large"}
+            status_code=413, content={"code": 413, "message": "request body too large"}
         )(scope, receive, send)
 
 
@@ -272,6 +297,10 @@ def create_app(bundle_root: Path) -> FastAPI:
     app.add_middleware(_RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
     app.state.runtime = runtime
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
+        return JSONResponse(status_code=400, content={"code": 400, "message": "invalid request"})
+
     @app.get("/healthz", response_model=HealthResponse)
     def healthz() -> HealthResponse:
         return HealthResponse(
@@ -283,16 +312,22 @@ def create_app(bundle_root: Path) -> FastAPI:
 
     @app.post("/api/v1/emotion/recognize", response_model=RecognizeResponse)
     def recognize(request: RecognizeRequest) -> RecognizeResponse:
+        started_at = perf_counter()
+        lyric_text = compose_lyrics(
+            request.text_lyric, request.lrc_lyric, request.lrc_translation
+        )
         song = Song(
-            song_id=request.song_id or "",
+            song_id=request.song_id,
             labels=frozenset(),
-            name=request.title,
+            name=request.song_name,
             artists=request.artists or "",
-            genre=request.genre or "",
-            text=request.lyrics or "",
-            audio_url="",
+            genre=request.album_name or "",
+            text=lyric_text,
+            audio_url=request.audio_url,
         )
         scores = runtime.scorer.score(song.text.strip() or song.name)
+        if not isinstance(scores, dict) or set(scores) != set(runtime.scorer.labels):
+            raise RuntimeError("model returned invalid scores")
         ranked: list[tuple[str, float]] = []
         for label in runtime.scorer.labels:
             value = scores.get(label)
@@ -302,13 +337,26 @@ def create_app(bundle_root: Path) -> FastAPI:
             if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
                 raise RuntimeError("model returned invalid scores")
             ranked.append((label, confidence))
-        emotion_label, confidence = max(ranked, key=lambda item: item[1])
+        if len(ranked) < 2:
+            raise RuntimeError("model returned insufficient labels")
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        (top_emotion, top_confidence), (second_emotion, second_confidence) = ranked[:2]
+        evidence = build_evidence(
+            text_lyric=request.text_lyric,
+            lrc_lyric=request.lrc_lyric,
+            lrc_translation=request.lrc_translation,
+        )
         return RecognizeResponse(
-            song_id=request.song_id,
-            emotion_label=emotion_label,
-            confidence=confidence,
-            model_type=runtime.model_type,
-            model_version=runtime.model_version,
+            code=200,
+            data=RecognizeData(
+                top_emotion=top_emotion,
+                top_confidence=round(top_confidence, 4),
+                second_emotion=second_emotion,
+                second_confidence=round(second_confidence, 4),
+                evidence=evidence,
+                cost_ms=max(0, int((perf_counter() - started_at) * 1000)),
+            ),
+            error="",
         )
 
     return app
