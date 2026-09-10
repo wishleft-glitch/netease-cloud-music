@@ -7,7 +7,7 @@ from pathlib import Path
 import socket
 import subprocess
 from tempfile import NamedTemporaryFile
-from typing import Mapping
+from typing import Collection, Mapping
 from urllib.parse import urljoin, urlsplit
 
 import httpcore
@@ -109,14 +109,24 @@ def download_audio(
     destination: str | Path,
     max_bytes: int = 25_000_000,
     timeout_seconds: float = 12.0,
+    *,
+    proxy_url: str | None = None,
+    allowed_hosts: Collection[str] | None = None,
 ) -> Path:
-    """Download a public HTTP(S) audio payload without replacing a prior file on failure."""
+    """Download audio without replacing a prior file on failure.
+
+    Direct downloads pin a globally routable DNS result to the actual socket
+    connection. A proxy is an explicit deployment trust boundary: it requires
+    both an operator-configured proxy URL and an exact allowlist of HTTPS audio
+    hosts. Environment proxy settings are never used.
+    """
     if not isinstance(url, str) or not url.strip():
         raise ValueError("audio URL must be a nonblank http or https URL")
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
     if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    trusted_proxy = _validate_trusted_proxy_configuration(proxy_url, allowed_hosts)
 
     target = Path(destination)
     temporary_path: Path | None = None
@@ -135,6 +145,7 @@ def download_audio(
                 temporary_file,
                 max_bytes=max_bytes,
                 timeout_seconds=float(timeout_seconds),
+                trusted_proxy=trusted_proxy,
             )
         os.replace(temporary_path, target)
         return target
@@ -291,6 +302,7 @@ def _run_download_with_deadline(
     *,
     max_bytes: int,
     timeout_seconds: float,
+    trusted_proxy: tuple[str, frozenset[str]] | None,
 ) -> None:
     try:
         asyncio.get_running_loop()
@@ -301,6 +313,7 @@ def _run_download_with_deadline(
                 temporary_file,
                 max_bytes=max_bytes,
                 timeout_seconds=timeout_seconds,
+                trusted_proxy=trusted_proxy,
             )
         )
         return
@@ -313,19 +326,27 @@ async def _download_to_temporary_file(
     *,
     max_bytes: int,
     timeout_seconds: float,
+    trusted_proxy: tuple[str, frozenset[str]] | None,
 ) -> None:
     total = 0
     current_url = url
     try:
         async with asyncio.timeout(timeout_seconds):
-            async with httpx.AsyncClient(
-                transport=_PinnedAsyncTransport(),
-                follow_redirects=False,
-                timeout=None,
-                trust_env=False,
-            ) as client:
+            if trusted_proxy is None:
+                _validate_http_url(current_url)
+            else:
+                _validate_trusted_proxy_target(current_url, trusted_proxy[1])
+            client_options: dict[str, object] = {
+                "follow_redirects": False,
+                "timeout": None,
+                "trust_env": False,
+            }
+            if trusted_proxy is None:
+                client_options["transport"] = _PinnedAsyncTransport()
+            else:
+                client_options["proxy"] = trusted_proxy[0]
+            async with httpx.AsyncClient(**client_options) as client:
                 for redirects in range(MAX_REDIRECTS + 1):
-                    _validate_http_url(current_url)
                     async with client.stream("GET", current_url) as response:
                         if 300 <= response.status_code < 400:
                             location = response.headers.get("Location")
@@ -334,6 +355,11 @@ async def _download_to_temporary_file(
                             if redirects == MAX_REDIRECTS:
                                 raise ValueError("audio download exceeded redirect limit")
                             current_url = urljoin(current_url, location)
+                            if trusted_proxy is None:
+                                _validate_http_url(current_url)
+                            else:
+                                current_url = _upgrade_allowlisted_http_redirect(current_url, trusted_proxy[1])
+                                _validate_trusted_proxy_target(current_url, trusted_proxy[1])
                             continue
                         response.raise_for_status()
                         async for chunk in response.aiter_bytes():
@@ -366,6 +392,125 @@ def _validate_http_url(url: str) -> None:
         or parsed.password is not None
     ):
         raise ValueError("audio URL must be a valid public http or https URL")
+
+
+def _validate_trusted_proxy_configuration(
+    proxy_url: str | None,
+    allowed_hosts: Collection[str] | None,
+) -> tuple[str, frozenset[str]] | None:
+    if proxy_url is None and allowed_hosts is None:
+        return None
+    if not isinstance(proxy_url, str) or not proxy_url.strip() or allowed_hosts is None:
+        raise ValueError("trusted proxy mode requires both proxy_url and allowed_hosts")
+    try:
+        parsed_proxy = urlsplit(proxy_url)
+        proxy_port = parsed_proxy.port
+    except ValueError as error:
+        raise ValueError("trusted proxy URL must be a valid http or https URL") from error
+    if (
+        parsed_proxy.scheme not in {"http", "https"}
+        or not parsed_proxy.hostname
+        or parsed_proxy.username is not None
+        or parsed_proxy.password is not None
+        or parsed_proxy.query
+        or parsed_proxy.fragment
+        or parsed_proxy.path not in {"", "/"}
+        or proxy_port is not None and not 1 <= proxy_port <= 65535
+    ):
+        raise ValueError("trusted proxy URL must be a valid credential-free http or https URL")
+    if isinstance(allowed_hosts, (str, bytes)):
+        raise ValueError("trusted proxy allowed_hosts must be a nonempty host collection")
+    try:
+        normalized_hosts = frozenset(_normalize_allowlisted_host(host) for host in allowed_hosts)
+    except TypeError as error:
+        raise ValueError("trusted proxy allowed_hosts must be a nonempty host collection") from error
+    if not normalized_hosts:
+        raise ValueError("trusted proxy allowed_hosts must be nonempty")
+    return proxy_url, normalized_hosts
+
+
+def _normalize_allowlisted_host(host: str) -> str:
+    if not isinstance(host, str) or not host or host != host.strip():
+        raise ValueError("trusted proxy allowlist contains an invalid host")
+    candidate = host.rstrip(".").lower()
+    if not candidate:
+        raise ValueError("trusted proxy allowlist contains an invalid host")
+    try:
+        parsed = urlsplit(f"//{candidate}")
+        parsed_port = parsed.port
+    except ValueError as error:
+        raise ValueError("trusted proxy allowlist contains an invalid host") from error
+    if (
+        parsed.hostname != candidate
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed_port is not None
+    ):
+        raise ValueError("trusted proxy allowlist contains an invalid host")
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return candidate
+    raise ValueError("trusted proxy allowlist must not contain an IP address")
+
+
+def _validate_trusted_proxy_target(url: str, allowed_hosts: frozenset[str]) -> None:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("trusted proxy audio URL must be a valid HTTPS URL") from error
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        raise ValueError("trusted proxy audio URL must be an allowlisted HTTPS origin")
+    normalized_host = host.rstrip(".").lower()
+    try:
+        ipaddress.ip_address(normalized_host)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("trusted proxy audio URL must not use an IP address")
+    if normalized_host not in allowed_hosts:
+        raise ValueError("trusted proxy audio URL host is not in the exact allowlist")
+
+
+def _upgrade_allowlisted_http_redirect(url: str, allowed_hosts: frozenset[str]) -> str:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("trusted proxy audio redirect must be a valid URL") from error
+    if parsed.scheme != "http":
+        return url
+    if (
+        not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 80}
+    ):
+        raise ValueError("trusted proxy audio redirect must be an allowlisted HTTPS origin")
+    normalized_host = host.rstrip(".").lower()
+    try:
+        ipaddress.ip_address(normalized_host)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("trusted proxy audio redirect must not use an IP address")
+    if normalized_host not in allowed_hosts:
+        raise ValueError("trusted proxy audio redirect host is not in the exact allowlist")
+    return parsed._replace(scheme="https", netloc=normalized_host).geturl()
+
+
 def _resolve_public_host(host: str, port: int | None) -> str:
     try:
         addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)

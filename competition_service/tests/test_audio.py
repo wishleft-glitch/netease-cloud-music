@@ -112,6 +112,105 @@ class DownloadAudioTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "http"):
                 download_audio("file:///secret", Path(directory) / "track.bin")
 
+    def test_trusted_proxy_allows_only_exact_official_redirect_hosts(self) -> None:
+        client = self.async_client(
+            self.async_response(status_code=302, location="https://m7.music.126.net/audio?id=2"),
+            self.async_response(),
+        )
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "track.bin"
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client) as async_client:
+                download_audio(
+                    "https://music.163.com/song/media/outer/url?id=1",
+                    destination,
+                    proxy_url="http://127.0.0.1:7897",
+                    allowed_hosts=("music.163.com", "m7.music.126.net"),
+                )
+
+        self.assertEqual(
+            client.stream_calls,
+            [
+                ("GET", "https://music.163.com/song/media/outer/url?id=1"),
+                ("GET", "https://m7.music.126.net/audio?id=2"),
+            ],
+        )
+        self.assertEqual(async_client.call_args.kwargs["proxy"], "http://127.0.0.1:7897")
+        self.assertFalse(async_client.call_args.kwargs["trust_env"])
+        self.assertNotIn("transport", async_client.call_args.kwargs)
+
+    def test_trusted_proxy_upgrades_only_an_allowlisted_http_cdn_redirect_to_https(self) -> None:
+        client = self.async_client(
+            self.async_response(status_code=302, location="http://m7.music.126.net/audio?signature=a%2Bb"),
+            self.async_response(),
+        )
+        with TemporaryDirectory() as directory:
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
+                download_audio(
+                    "https://music.163.com/song/media/outer/url?id=1",
+                    Path(directory) / "track.bin",
+                    proxy_url="http://127.0.0.1:7897",
+                    allowed_hosts=("music.163.com", "m7.music.126.net"),
+                )
+
+        self.assertEqual(client.stream_calls[1], ("GET", "https://m7.music.126.net/audio?signature=a%2Bb"))
+
+    def test_trusted_proxy_rejects_unlisted_redirect_before_requesting_it(self) -> None:
+        client = self.async_client(self.async_response(status_code=302, location="https://evil.music.126.net/audio"))
+        with TemporaryDirectory() as directory:
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client):
+                with self.assertRaisesRegex(ValueError, "allowlist"):
+                    download_audio(
+                        "https://music.163.com/song/media/outer/url?id=1",
+                        Path(directory) / "track.bin",
+                        proxy_url="http://127.0.0.1:7897",
+                        allowed_hosts=("music.163.com", "m7.music.126.net"),
+                    )
+
+        self.assertEqual(client.stream_calls, [("GET", "https://music.163.com/song/media/outer/url?id=1")])
+
+    def test_trusted_proxy_rejects_invalid_configuration_before_creating_a_client(self) -> None:
+        cases = (
+            ("http://127.0.0.1:7897", ()),
+            ("http://user@127.0.0.1:7897", ("music.163.com",)),
+            ("file:///proxy", ("music.163.com",)),
+            (None, ("music.163.com",)),
+            ("http://127.0.0.1:7897", ("m7.music.126.net.evil.test", "https://music.163.com")),
+        )
+        with TemporaryDirectory() as directory:
+            for proxy_url, allowed_hosts in cases:
+                with patch("competition_emotion.audio.httpx.AsyncClient") as async_client:
+                    with self.assertRaises(ValueError):
+                        download_audio(
+                            "https://music.163.com/song/media/outer/url?id=1",
+                            Path(directory) / "track.bin",
+                            proxy_url=proxy_url,
+                            allowed_hosts=allowed_hosts,
+                        )
+                async_client.assert_not_called()
+
+    def test_trusted_proxy_rejects_direct_ip_audio_target_before_creating_a_client(self) -> None:
+        with TemporaryDirectory() as directory:
+            with patch("competition_emotion.audio.httpx.AsyncClient") as async_client:
+                with self.assertRaisesRegex(ValueError, "IP address"):
+                    download_audio(
+                        "https://93.184.216.34/audio",
+                        Path(directory) / "track.bin",
+                        proxy_url="http://127.0.0.1:7897",
+                        allowed_hosts=("music.163.com",),
+                    )
+
+        async_client.assert_not_called()
+
+    def test_direct_download_still_uses_the_pinned_transport_without_proxy(self) -> None:
+        client = self.async_client(self.async_response())
+        with TemporaryDirectory() as directory:
+            with patch("competition_emotion.audio.httpx.AsyncClient", return_value=client) as async_client:
+                download_audio("https://example.test/music", Path(directory) / "track.bin")
+
+        self.assertIn("transport", async_client.call_args.kwargs)
+        self.assertNotIn("proxy", async_client.call_args.kwargs)
+        self.assertFalse(async_client.call_args.kwargs["trust_env"])
+
     def test_resolver_rejects_every_non_global_address_including_cgnat(self) -> None:
         addresses = [
             (2, 1, 6, "", ("93.184.216.34", 0)),
