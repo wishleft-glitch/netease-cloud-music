@@ -7,17 +7,19 @@ from pathlib import Path
 from shutil import copyfile
 import stat
 from tempfile import TemporaryDirectory
+from threading import Event
 from time import perf_counter
 import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+import httpx
 import numpy as np
 
 from competition_emotion.constants import LABELS
 from competition_emotion.models import TextScorer, save_text_scorer
 from competition_emotion.request_audio import RequestAudioResult
-from competition_emotion.service import MAX_REQUEST_BODY_BYTES, create_app
+from competition_emotion.service import MAX_REQUEST_BODY_BYTES, ServiceAudioConfig, create_app
 from competition_emotion.types import Song
 
 
@@ -172,6 +174,58 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(acquire.call_args.kwargs["deadline_monotonic"], 125.0)
+
+    def test_http_audio_error_keeps_a_valid_text_response_and_hides_url(self) -> None:
+        audio_app = create_app(_write_bundle(Path(self.directory.name) / "http-error-bundle"))
+        audio_client = TestClient(audio_app)
+        request = httpx.Request("GET", "https://audio.example.test/signed?token=secret")
+        error = httpx.HTTPStatusError("secret signed URL", request=request, response=httpx.Response(503, request=request))
+        with patch.object(audio_app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)), patch(
+            "competition_emotion.service.acquire_request_audio", side_effect=error
+        ):
+            response = audio_client.post("/api/v1/emotion/recognize", json=self._request())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["top_emotion"], "狂欢")
+        self.assertIn("音频未参与", response.json()["data"]["evidence"])
+        self.assertNotIn("secret", response.text)
+
+    def test_saturated_audio_capacity_skips_queue_and_keeps_health_responsive(self) -> None:
+        audio_app = create_app(
+            _write_bundle(Path(self.directory.name) / "saturation-bundle"),
+            audio_config=ServiceAudioConfig(max_concurrent_audio=1),
+        )
+        entered = Event()
+        release = Event()
+
+        def blocking_audio(*_: object, **__: object) -> RequestAudioResult:
+            entered.set()
+            release.wait(timeout=2)
+            return RequestAudioResult("measured", {"rms_db": -3.0})
+
+        async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response, int]:
+            transport = httpx.ASGITransport(app=audio_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                with patch.object(audio_app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)), patch(
+                    "competition_emotion.service.acquire_request_audio", side_effect=blocking_audio
+                ) as acquire:
+                    first = asyncio.create_task(client.post("/api/v1/emotion/recognize", json=self._request()))
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    health = await asyncio.wait_for(client.get("/healthz"), timeout=0.5)
+                    second = await asyncio.wait_for(
+                        client.post("/api/v1/emotion/recognize", json=self._request(song_id="second")), timeout=0.5
+                    )
+                    calls = acquire.call_count
+                    release.set()
+                    first_response = await asyncio.wait_for(first, timeout=1)
+            return first_response, second, health, calls
+
+        first, second, health, calls = asyncio.run(exercise())
+        self.assertEqual(calls, 1)
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertIn("音频未参与", second.json()["data"]["evidence"])
 
     def test_router_404_and_405_use_safe_protocol_envelopes(self) -> None:
         method_not_allowed = self.client.get("/api/v1/emotion/recognize")

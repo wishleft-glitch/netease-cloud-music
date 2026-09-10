@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import httpx
 import numpy as np
 
 from competition_emotion.request_audio import RequestAudioConfig, acquire_request_audio
@@ -104,6 +105,20 @@ class RequestAudioTests(unittest.TestCase):
             RequestAudioConfig(proxy_url="http://proxy.example.test")
         with self.assertRaises(ValueError):
             RequestAudioConfig(allowed_hosts=("audio.example.test",))
+
+    def test_http_download_error_becomes_sanitized_unavailable_result(self) -> None:
+        request = httpx.Request("GET", "https://audio.example.test/signed?token=secret")
+        response = httpx.Response(503, request=request)
+        error = httpx.HTTPStatusError("secret signed URL", request=request, response=response)
+        with patch("competition_emotion.request_audio.download_audio", side_effect=error):
+            result = acquire_request_audio(
+                "https://audio.example.test/signed?token=secret",
+                RequestAudioConfig(),
+            )
+
+        self.assertEqual(result.state, "unavailable")
+        self.assertIsNone(result.features)
+        self.assertNotIn("secret", repr(result))
 
 
 if __name__ == "__main__":

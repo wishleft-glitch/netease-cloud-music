@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from dataclasses import dataclass, field
 import json
 import math
@@ -21,6 +22,7 @@ from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 import uvicorn
+import httpx
 import numpy as np
 
 from .models import TextScorer, load_text_scorer
@@ -111,6 +113,7 @@ class ServiceAudioConfig:
 
     request_config: RequestAudioConfig = field(default_factory=RequestAudioConfig)
     request_deadline_seconds: float = MAX_INTERNAL_REQUEST_SECONDS
+    max_concurrent_audio: int = 4
 
     def __post_init__(self) -> None:
         if not isinstance(self.request_config, RequestAudioConfig):
@@ -122,9 +125,38 @@ class ServiceAudioConfig:
             or not 0.0 < float(self.request_deadline_seconds) <= MAX_INTERNAL_REQUEST_SECONDS
         ):
             raise ValueError("request_deadline_seconds must be positive and no greater than 25")
+        if (
+            isinstance(self.max_concurrent_audio, bool)
+            or not isinstance(self.max_concurrent_audio, int)
+            or self.max_concurrent_audio < 1
+        ):
+            raise ValueError("max_concurrent_audio must be a positive integer")
 
 
 _DEFAULT_SERVICE_AUDIO_CONFIG = ServiceAudioConfig()
+
+
+class _AudioCapacityController:
+    """A non-queuing audio permit pool owned by one application instance."""
+
+    def __init__(self, maximum: int) -> None:
+        self._maximum = maximum
+        self._semaphores: dict[asyncio.AbstractEventLoop, asyncio.BoundedSemaphore] = {}
+
+    async def try_acquire(self) -> asyncio.BoundedSemaphore | None:
+        loop = asyncio.get_running_loop()
+        semaphore = self._semaphores.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.BoundedSemaphore(self._maximum)
+            self._semaphores[loop] = semaphore
+        if semaphore.locked():
+            return None
+        await semaphore.acquire()
+        return semaphore
+
+    @staticmethod
+    def release(semaphore: asyncio.BoundedSemaphore) -> None:
+        semaphore.release()
 
 
 class _RequestBodyLimitMiddleware:
@@ -332,6 +364,9 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
     app = FastAPI(title="Competition Emotion Service", version=runtime.model_version)
     app.add_middleware(_RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
     app.state.runtime = runtime
+    app.state.audio_capacity = (
+        _AudioCapacityController(audio_config.max_concurrent_audio) if audio_config is not None else None
+    )
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
@@ -356,7 +391,7 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
         )
 
     @app.get("/healthz", response_model=HealthResponse)
-    def healthz() -> HealthResponse:
+    async def healthz() -> HealthResponse:
         return HealthResponse(
             ready=True,
             model_type=runtime.model_type,
@@ -365,7 +400,7 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
         )
 
     @app.post("/api/v1/emotion/recognize", response_model=RecognizeResponse)
-    def recognize(request: RecognizeRequest, http_request: Request) -> RecognizeResponse:
+    async def recognize(request: RecognizeRequest, http_request: Request) -> RecognizeResponse:
         started_at = http_request.scope[_REQUEST_STARTED_AT_SCOPE_KEY]
         lyric_text = compose_lyrics(
             request.text_lyric, request.lrc_lyric, request.lrc_translation
@@ -380,7 +415,7 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
             text=lyric_text,
             audio_url=request.audio_url,
         )
-        scores = runtime.scorer.score(song.text if lyric_used else song.name)
+        scores = await asyncio.to_thread(runtime.scorer.score, song.text if lyric_used else song.name)
         if not isinstance(scores, dict) or set(scores) != set(runtime.scorer.labels):
             raise RuntimeError("model returned invalid scores")
         ranked: list[tuple[str, float]] = []
@@ -400,14 +435,20 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
         if audio_config is not None:
             request_started_at = http_request.scope[_REQUEST_MONOTONIC_STARTED_AT_SCOPE_KEY]
             request_deadline = request_started_at + float(audio_config.request_deadline_seconds)
-            try:
-                audio_result = acquire_request_audio(
-                    request.audio_url,
-                    audio_config.request_config,
-                    deadline_monotonic=request_deadline,
-                )
-            except (ValueError, RuntimeError, OSError, TimeoutError):
-                audio_result = RequestAudioResult("unavailable")
+            capacity = app.state.audio_capacity
+            lease = await capacity.try_acquire()
+            if lease is not None:
+                try:
+                    audio_result = await asyncio.to_thread(
+                        acquire_request_audio,
+                        request.audio_url,
+                        audio_config.request_config,
+                        deadline_monotonic=request_deadline,
+                    )
+                except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError):
+                    audio_result = RequestAudioResult("unavailable")
+                finally:
+                    capacity.release(lease)
         evidence = build_evidence(
             lyric_used=lyric_used,
             title_used=not lyric_used,

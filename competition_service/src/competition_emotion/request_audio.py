@@ -10,6 +10,8 @@ from time import monotonic
 from types import MappingProxyType
 from typing import Mapping
 
+import httpx
+
 from .audio import _validate_trusted_proxy_configuration, decode_audio, download_audio, measured_features
 
 
@@ -118,7 +120,7 @@ def acquire_request_audio(
             if _remaining_seconds(deadline) <= 0.0:
                 return RequestAudioResult("unavailable")
             return RequestAudioResult("measured", features)
-    except (ValueError, RuntimeError, OSError, TimeoutError):
+    except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError):
         return RequestAudioResult("unavailable")
 
 
