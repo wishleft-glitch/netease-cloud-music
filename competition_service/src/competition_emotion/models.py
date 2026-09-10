@@ -278,7 +278,7 @@ def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
     )
 
 
-def load_text_scorer(path: str | Path, *, trusted: bool = False) -> TextScorer:
+def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextScorer:
     """Load a scorer only after the caller explicitly trusts its joblib artifact.
 
     Joblib deserializes pickle data, so callers must set ``trusted=True`` only
@@ -287,7 +287,10 @@ def load_text_scorer(path: str | Path, *, trusted: bool = False) -> TextScorer:
     if not trusted:
         raise ValueError("joblib artifacts must be trusted; pass trusted=True")
     try:
-        record: Any = joblib.load(Path(path))
+        # A service can pass an already-validated open file handle so the
+        # artifact cannot be swapped between path validation and deserialization.
+        source = path if hasattr(path, "read") else Path(path)
+        record: Any = joblib.load(source)
     except Exception as error:
         raise ValueError("invalid text scorer payload") from error
     if not isinstance(record, dict):

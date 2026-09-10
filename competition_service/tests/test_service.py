@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+import asyncio
 from pathlib import Path
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+import numpy as np
 
 from competition_emotion.models import TextScorer, save_text_scorer
-from competition_emotion.service import create_app
+from competition_emotion.service import MAX_REQUEST_BODY_BYTES, create_app
 from competition_emotion.types import Song
 
 
@@ -85,6 +89,40 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(client.post("/api/v1/emotion/recognize", json={"title": "ok", "extra": "no"}).status_code, 422)
             self.assertEqual(client.post("/api/v1/emotion/recognize", json={"title": "x" * 301}).status_code, 422)
 
+    def test_body_limit_rejects_declared_and_misreported_oversized_payloads(self) -> None:
+        with TemporaryDirectory() as directory:
+            client = TestClient(create_app(_write_bundle(Path(directory) / "bundle")))
+            oversized = b" " * (MAX_REQUEST_BODY_BYTES + 1)
+            self.assertEqual(
+                client.post("/api/v1/emotion/recognize", content=oversized).status_code,
+                413,
+            )
+            # The counting receive wrapper also applies when there is no
+            # Content-Length header at all, as in a chunked request.
+            sent: list[dict[str, object]] = []
+
+            async def receive() -> dict[str, object]:
+                return {"type": "http.request", "body": oversized, "more_body": False}
+
+            async def send(message: dict[str, object]) -> None:
+                sent.append(message)
+
+            scope: dict[str, object] = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/v1/emotion/recognize",
+                "raw_path": b"/api/v1/emotion/recognize",
+                "query_string": b"",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+            }
+            asyncio.run(client.app(scope, receive, send))
+            self.assertEqual(sent[0]["status"], 413)
+
     def test_corrupted_or_malicious_pointer_is_refused_at_initialization(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory) / "bundle"
@@ -109,6 +147,77 @@ class ServiceTests(unittest.TestCase):
             report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "labels do not match"):
                 create_app(root)
+
+    def test_raw_symlink_bundle_root_is_refused_at_initialization(self) -> None:
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            target = _write_bundle(base / "actual-bundle")
+            symlink = base / "symlink-bundle"
+            try:
+                symlink.symlink_to(target, target_is_directory=True)
+            except OSError as error:  # pragma: no cover - host policy can deny symlinks
+                # Windows hosts without Developer Mode cannot create a test
+                # symlink.  Simulate the raw lstat result instead: rejection
+                # occurs before resolve, which is the security property here.
+                parts = list(target.lstat())
+                parts[0] = stat.S_IFLNK | 0o777
+                fake_symlink_stat = os.stat_result(parts)
+                with patch("competition_emotion.service.Path.lstat", return_value=fake_symlink_stat):
+                    with self.assertRaisesRegex(ValueError, "bundle root must be a regular directory"):
+                        create_app(target)
+            else:
+                with self.assertRaisesRegex(ValueError, "bundle root must be a regular directory"):
+                    create_app(symlink)
+
+    def test_model_replacement_between_precheck_and_open_is_refused_without_loading(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = _write_bundle(Path(directory) / "bundle")
+            version_dir = root / "versions" / "test-version"
+            model_path = version_dir / "model.joblib"
+            replacement_path = version_dir / "replacement.joblib"
+            save_text_scorer(
+                TextScorer().fit(
+                    [
+                        Song("a", frozenset({"狂欢"}), "a", "", "", "热闹", ""),
+                        Song("b", frozenset({"孤独"}), "b", "", "", "孤单", ""),
+                        Song("c", frozenset({"狂欢"}), "c", "", "", "欢呼", ""),
+                        Song("d", frozenset({"孤独"}), "d", "", "", "寂寞", ""),
+                    ],
+                    LABELS,
+                ),
+                replacement_path,
+            )
+            real_open = os.open
+            replaced = False
+
+            def replace_before_open(path: str | bytes | os.PathLike[str], flags: int, *args: object) -> int:
+                nonlocal replaced
+                if Path(path) == model_path and not replaced:
+                    replaced = True
+                    os.replace(replacement_path, model_path)
+                return real_open(path, flags, *args)
+
+            with patch("competition_emotion.service.os.open", side_effect=replace_before_open), patch(
+                "competition_emotion.service.load_text_scorer"
+            ) as loader:
+                with self.assertRaisesRegex(ValueError, "changed while opening"):
+                    create_app(root)
+            self.assertTrue(replaced)
+            loader.assert_not_called()
+
+    def test_invalid_nonwinning_scores_are_rejected_before_ranking(self) -> None:
+        with TemporaryDirectory() as directory:
+            app = create_app(_write_bundle(Path(directory) / "bundle"))
+            client = TestClient(app, raise_server_exceptions=False)
+            for invalid in (float("nan"), True, np.bool_(True)):
+                with self.subTest(invalid=repr(invalid)), patch.object(
+                    app.state.runtime.scorer,
+                    "score",
+                    return_value={"狂欢": 0.8, "孤独": invalid},
+                ):
+                    response = client.post("/api/v1/emotion/recognize", json={"title": "验证"})
+                self.assertEqual(response.status_code, 500)
+                self.assertNotIn("invalid scores", response.text)
 
 
 if __name__ == "__main__":
