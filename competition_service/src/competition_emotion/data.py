@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 import hashlib
 import os
@@ -46,8 +47,9 @@ def _song_text(parts: Iterable[str]) -> str:
     return " ".join(part for part in parts if part)
 
 
-def workbook_provenance(path: Path) -> dict[str, object]:
-    """Return the minimum reproducible provenance for an official workbook."""
+@contextmanager
+def workbook_snapshot(path: Path) -> Iterator[tuple[Path, dict[str, object]]]:
+    """Yield one immutable workbook snapshot with its reproducible provenance."""
     source_path = Path(path)
     digest = hashlib.sha256()
     snapshot_path: Path | None = None
@@ -63,14 +65,21 @@ def workbook_provenance(path: Path) -> dict[str, object]:
                     digest.update(chunk)
                     snapshot.write(chunk)
 
-        return {
+        provenance = {
             "file_name": source_path.name,
             "sha256": digest.hexdigest(),
             "rows": len(pd.read_excel(snapshot_path)),
         }
+        yield snapshot_path, provenance
     finally:
         if snapshot_path is not None:
             snapshot_path.unlink(missing_ok=True)
+
+
+def workbook_provenance(path: Path) -> dict[str, object]:
+    """Return the minimum reproducible provenance for an official workbook."""
+    with workbook_snapshot(path) as (_, provenance):
+        return provenance
 
 
 def load_official_songs(path: Path) -> list[Song]:

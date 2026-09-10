@@ -14,7 +14,7 @@ from uuid import uuid4
 import numpy as np
 
 from .constants import LABELS, MODEL_VERSION
-from .data import load_official_songs, workbook_provenance
+from .data import load_official_songs, workbook_snapshot
 from .evaluate import metric_report
 from .models import TextScorer, save_text_scorer
 from .splits import make_holdout
@@ -173,8 +173,8 @@ def train_text_baseline(
     """Train and evaluate the lyrics baseline with a song-group-safe split."""
     configured_labels = tuple(labels)
     source_workbook = Path(workbook)
-    source = workbook_provenance(source_workbook)
-    songs = load_official_songs(source_workbook)
+    with workbook_snapshot(source_workbook) as (snapshot_path, source):
+        songs = load_official_songs(snapshot_path)
     assignment = make_holdout(songs, test_ratio=test_ratio, seed=seed)
     train_songs = [song for song in songs if song.song_id in assignment.train_ids]
     test_songs = [song for song in songs if song.song_id in assignment.test_ids]

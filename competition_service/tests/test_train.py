@@ -21,6 +21,71 @@ REQUIRED_COLUMNS = (
 
 
 class TrainTextBaselineTests(unittest.TestCase):
+    def test_uses_one_snapshot_when_source_is_replaced_before_loading(self) -> None:
+        original_rows = []
+        for index in range(12):
+            label = LABELS[index % 2]
+            original_rows.append(
+                {
+                    "歌曲id": str(index + 1),
+                    "情绪类型": label,
+                    "歌曲名称": f"original {index}",
+                    "一级曲风标签": "流行",
+                    "演唱艺人": "艺人",
+                    "文本歌词": "派对 跳舞 欢呼" if label == "狂欢" else "一个人 夜晚 寂寞",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            )
+        original_rows.append({**original_rows[0], "情绪类型": "孤独"})
+        replacement_rows = [
+            {
+                **row,
+                "歌曲id": str(index + 101),
+                "歌曲名称": f"replacement {index}",
+            }
+            for index, row in enumerate(original_rows[:8])
+        ]
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workbook = root / "official.xlsx"
+            replacement = root / "replacement.xlsx"
+            bundle_dir = root / "bundle"
+            pd.DataFrame(original_rows, columns=REQUIRED_COLUMNS).to_excel(workbook, index=False)
+            expected_sha256 = hashlib.sha256(workbook.read_bytes()).hexdigest()
+            pd.DataFrame(replacement_rows, columns=REQUIRED_COLUMNS).to_excel(replacement, index=False)
+            from competition_emotion.train import load_official_songs as real_loader
+
+            observed_loader_path: Path | None = None
+
+            def replace_source_before_loading(loader_path: Path) -> list[object]:
+                nonlocal observed_loader_path
+                observed_loader_path = loader_path
+                replacement.replace(workbook)
+                return real_loader(loader_path)
+
+            with patch(
+                "competition_emotion.train.load_official_songs",
+                side_effect=replace_source_before_loading,
+            ):
+                report = train_text_baseline(
+                    workbook, bundle_dir, labels=LABELS, seed=19, test_ratio=0.25
+                )
+
+            self.assertIsNotNone(observed_loader_path)
+            self.assertNotEqual(observed_loader_path, workbook)
+            self.assertEqual(
+                report["source"],
+                {
+                    "file_name": "official.xlsx",
+                    "sha256": expected_sha256,
+                    "rows": 13,
+                },
+            )
+            self.assertEqual(report["counts"]["total_songs"], 12)
+
     def test_end_to_end_writes_group_safe_evaluation_bundle(self) -> None:
         rows = []
         for index in range(12):

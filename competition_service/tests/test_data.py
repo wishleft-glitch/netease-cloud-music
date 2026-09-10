@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from competition_emotion.data import clean_lyric, load_official_songs, workbook_provenance
+from competition_emotion.data import (
+    clean_lyric,
+    load_official_songs,
+    workbook_provenance,
+    workbook_snapshot,
+)
 
 
 REQUIRED_COLUMNS = [
@@ -191,6 +196,35 @@ class OfficialSongLoaderTests(unittest.TestCase):
         self.assertTrue(replaced)
         self.assertEqual(provenance["sha256"], expected_sha256)
         self.assertEqual(provenance["rows"], 1)
+
+    def test_workbook_snapshot_cleans_up_after_success_and_error(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "1",
+                    "情绪类型": "平静",
+                    "歌曲名称": "original",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            ]
+        )
+
+        with workbook_snapshot(path) as (snapshot_path, provenance):
+            successful_snapshot = snapshot_path
+            self.assertTrue(snapshot_path.is_file())
+            self.assertEqual(provenance["rows"], 1)
+        self.assertFalse(successful_snapshot.exists())
+
+        with self.assertRaisesRegex(RuntimeError, "test failure"):
+            with workbook_snapshot(path) as (snapshot_path, _):
+                failed_snapshot = snapshot_path
+                raise RuntimeError("test failure")
+        self.assertFalse(failed_snapshot.exists())
 
     def test_none_lyrics_produce_valid_metadata_text(self) -> None:
         path = self.write_workbook(
