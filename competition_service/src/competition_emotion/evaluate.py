@@ -15,6 +15,8 @@ def _validate_labels(labels: tuple[str, ...]) -> None:
 def _validate_numeric_matrix(matrix: np.ndarray, name: str) -> None:
     if not np.issubdtype(matrix.dtype, np.number):
         raise ValueError(f"{name} must be numeric")
+    if np.issubdtype(matrix.dtype, np.complexfloating):
+        raise ValueError(f"{name} must be real-valued")
     if not np.isfinite(matrix).all():
         raise ValueError(f"{name} must contain only finite values")
 

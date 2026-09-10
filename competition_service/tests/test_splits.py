@@ -177,6 +177,20 @@ class MetricReportTests(unittest.TestCase):
                         ("狂欢", "孤独"),
                     )
 
+    def test_rejects_complex_metric_values_before_prediction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "real"):
+            metric_report(
+                np.array([[1 + 0j, 0 + 0j]]),
+                np.array([[0.8, 0.2]]),
+                ("狂欢", "孤独"),
+            )
+        with self.assertRaisesRegex(ValueError, "real"):
+            metric_report(
+                np.array([[1, 0]]),
+                np.array([[0.8 + 0j, 0.2 + 0j]]),
+                ("狂欢", "孤独"),
+            )
+
     def test_rejects_non_binary_or_non_numeric_truth_values(self) -> None:
         for bad_value in (-1, 0.5, 2):
             with self.subTest(value=bad_value):
@@ -209,6 +223,19 @@ class MetricReportTests(unittest.TestCase):
                 np.array([[0.8, 0.2]]),
                 ("狂欢", 1),
             )
+
+    def test_empty_rows_have_zero_top_one_metrics(self) -> None:
+        report = metric_report(
+            np.zeros((0, 2)),
+            np.zeros((0, 2)),
+            ("狂欢", "孤独"),
+        )
+
+        self.assertEqual(report["any_positive_top1_accuracy"], 0.0)
+        self.assertIsNone(report["strict_top1_accuracy"])
+        self.assertEqual(report["macro_recall"], 0.0)
+        self.assertEqual(report["per_label_recall"], {"狂欢": 0.0, "孤独": 0.0})
+        self.assertEqual(report["confusion_matrix"], [[0, 0], [0, 0]])
 
 
 if __name__ == "__main__":
