@@ -9,15 +9,18 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import hashlib
 import json
 import math
+from numbers import Real
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any
 from urllib.parse import quote
+
+import numpy as np
 
 from .audio import (
     FEATURE_NAMES,
@@ -77,7 +80,9 @@ def _safe_song_id(song_id: str) -> str:
     return f"{readable}-{digest}"
 
 
-def _url_hash(audio_url: str) -> str:
+def _url_hash(audio_url: object) -> str:
+    if not isinstance(audio_url, str) or not audio_url.strip():
+        raise ValueError("audio URL must be a nonblank string")
     return hashlib.sha256(audio_url.strip().encode("utf-8")).hexdigest()
 
 
@@ -88,17 +93,22 @@ def _record_path(cache_dir: Path, song_id: str) -> Path:
 def _is_reusable_success(record: object, song: Song) -> bool:
     if not isinstance(record, dict):
         return False
+    try:
+        current_url_hash = _url_hash(song.audio_url)
+    except ValueError:
+        return False
     if (
         record.get("schema_version") != CACHE_SCHEMA_VERSION
         or record.get("song_id") != song.song_id
-        or record.get("audio_url_sha256") != _url_hash(song.audio_url)
+        or record.get("audio_url_sha256") != current_url_hash
         or record.get("extraction_config_sha256") != EXTRACTION_CONFIG_SHA256
         or record.get("status") != "success"
     ):
         return False
     features = record.get("features")
     try:
-        return tuple(feature_vector(features).shape) == (len(FEATURE_NAMES),)
+        _validated_features(features)
+        return True
     except ValueError:
         return False
 
@@ -119,6 +129,26 @@ def _error_type(error: Exception) -> str:
     return name if name.isidentifier() else "AudioExtractionError"
 
 
+def _validated_features(features: object) -> dict[str, float]:
+    """Reject non-real and boolean feature values before cache publication.
+
+    NumPy coerces ``True`` to ``1.0``.  That is appropriate for some model
+    inputs but not for a persisted audio measurement: a cache success must be
+    reproducible numeric output from the extractor.
+    """
+    if not isinstance(features, dict) or tuple(features) != FEATURE_NAMES:
+        raise ValueError("features must use exactly the configured feature order")
+    normalized: dict[str, float] = {}
+    for name in FEATURE_NAMES:
+        value = features[name]
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real) or not math.isfinite(float(value)):
+            raise ValueError("feature values must be finite non-boolean real numbers")
+        normalized[name] = float(value)
+    # Keep the shared model-input validation as a second line of defense.
+    feature_vector(normalized)
+    return normalized
+
+
 def _extract_one(
     song: Song,
     cache_dir: Path,
@@ -129,18 +159,20 @@ def _extract_one(
 ) -> tuple[str, str | None]:
     """Build one record and return (status, error type when failed)."""
     record_path = _record_path(cache_dir, song.song_id)
-    if _cached_success(record_path, song):
-        return "skipped", None
-
     base_record: dict[str, object] = {
         "schema_version": CACHE_SCHEMA_VERSION,
         "song_id": song.song_id,
-        "audio_url_sha256": _url_hash(song.audio_url),
+        # Invalid source URLs cannot be hashed.  ``None`` records that state
+        # without ever persisting the URL, and makes the record non-reusable.
+        "audio_url_sha256": None,
         "extraction_config": EXTRACTION_CONFIG,
         "extraction_config_sha256": EXTRACTION_CONFIG_SHA256,
     }
     temporary_root = cache_dir / "temporary"
     try:
+        base_record["audio_url_sha256"] = _url_hash(song.audio_url)
+        if _cached_success(record_path, song):
+            return "skipped", None
         temporary_root.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="audio-", dir=temporary_root) as temporary_dir:
             audio_path = Path(temporary_dir) / "source.audio"
@@ -152,10 +184,7 @@ def _extract_one(
                 allowed_hosts=allowed_hosts,
             )
             waveform, sample_rate = decode_audio(audio_path)
-            features = measured_features(waveform, sample_rate)
-            # feature_vector enforces exact field names and finite values before
-            # a cache success becomes reusable.
-            feature_vector(features)
+            features = _validated_features(measured_features(waveform, sample_rate))
         _atomic_json(
             record_path, base_record | {"status": "success", "features": features}, sort_keys=False
         )
@@ -214,6 +243,38 @@ def _bounded_error_counts(errors: Sequence[str]) -> dict[str, int]:
     return result
 
 
+def _run_bounded_parallel(
+    songs: Sequence[Song],
+    run: Any,
+    workers: int,
+) -> list[tuple[str, str | None]]:
+    """Run at most ``workers`` submitted tasks at any moment, in input order."""
+    outcomes: list[tuple[str, str | None] | None] = [None] * len(songs)
+    iterator = iter(enumerate(songs))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="audio-cache") as executor:
+        in_flight: dict[Future[tuple[str, str | None]], int] = {}
+
+        def submit_next() -> bool:
+            try:
+                index, song = next(iterator)
+            except StopIteration:
+                return False
+            in_flight[executor.submit(run, song)] = index
+            return True
+
+        for _ in range(min(workers, len(songs))):
+            submit_next()
+        while in_flight:
+            completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in completed:
+                index = in_flight.pop(future)
+                outcomes[index] = future.result()
+                submit_next()
+    if any(outcome is None for outcome in outcomes):  # defensive invariant
+        raise RuntimeError("audio cache worker did not produce every outcome")
+    return [outcome for outcome in outcomes if outcome is not None]
+
+
 def build_audio_feature_cache(
     songs: Sequence[Song],
     cache_dir: str | Path,
@@ -249,10 +310,7 @@ def build_audio_feature_cache(
     if workers == 1:
         outcomes = [run(song) for song in selected]
     else:
-        # executor.map preserves selected ordering while bounding in-flight work
-        # to the explicit operator-selected worker limit.
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="audio-cache") as executor:
-            outcomes = list(executor.map(run, selected))
+        outcomes = _run_bounded_parallel(selected, run, workers)
 
     statuses = Counter(status for status, _ in outcomes)
     errors = [error for _, error in outcomes if error is not None]

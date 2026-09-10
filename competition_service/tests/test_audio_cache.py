@@ -110,6 +110,43 @@ class AudioFeatureCacheTests(unittest.TestCase):
             self.assertNotIn("secret-two", failed_record)
             self.assertNotIn("signed source", failed_record)
 
+    def test_malformed_song_url_is_recorded_as_a_failure_without_stopping_worker_batch(self) -> None:
+        malformed = Song("bad-url", frozenset({"孤独"}), "name", "artist", "genre", "text", 42)  # type: ignore[arg-type]
+        valid = song("good-url", "https://cdn.example.test/good?token=private")
+        with TemporaryDirectory() as directory, self._patch_extraction() as mocked:
+            mocked["download_audio"].side_effect = self.fake_download
+            cache_dir = Path(directory) / "cache"
+            summary = build_audio_feature_cache([valid, malformed], cache_dir, workers=2)
+
+            self.assertEqual(summary["attempted"], 2)
+            self.assertEqual(summary["succeeded"], 1)
+            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(mocked["download_audio"].call_count, 1)
+            records = [json.loads(path.read_text(encoding="utf-8")) for path in (cache_dir / "records").glob("*.json")]
+            failed = next(record for record in records if record["song_id"] == "bad-url")
+            self.assertEqual(failed["status"], "error")
+            self.assertIsNone(failed["audio_url_sha256"])
+            self.assertNotIn("42", json.dumps(failed, ensure_ascii=False))
+
+    def test_boolean_cached_features_are_not_accepted_or_reused(self) -> None:
+        source = [song("42", "https://cdn.example.test/42?signature=private")]
+        with TemporaryDirectory() as directory, self._patch_extraction() as mocked:
+            mocked["download_audio"].side_effect = self.fake_download
+            root = Path(directory)
+            for index, boolean in enumerate((True, False)):
+                cache_dir = root / str(index)
+                build_audio_feature_cache(source, cache_dir)
+                record_path = next((cache_dir / "records").glob("*.json"))
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                record["features"]["rms_db"] = boolean
+                record_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+
+                summary = build_audio_feature_cache(source, cache_dir)
+                self.assertEqual(summary["skipped"], 0)
+                self.assertEqual(summary["succeeded"], 1)
+
+            self.assertEqual(mocked["download_audio"].call_count, 4)
+
     def test_batch_continues_after_one_song_failure_in_sorted_order(self) -> None:
         requested: list[str] = []
 
@@ -128,6 +165,52 @@ class AudioFeatureCacheTests(unittest.TestCase):
             self.assertEqual(summary["failed"], 1)
             self.assertEqual(summary["error_counts"], {"RuntimeError": 1})
             self.assertEqual(requested, [self.songs[1].audio_url, self.songs[0].audio_url])
+
+    def test_worker_mode_submits_at_most_the_configured_in_flight_limit(self) -> None:
+        class CompletedFuture:
+            def __init__(self, value: tuple[str, str | None]) -> None:
+                self.value = value
+
+            def result(self) -> tuple[str, str | None]:
+                return self.value
+
+        class RecordingExecutor:
+            submissions: list[str] = []
+
+            def __init__(self, *, max_workers: int, thread_name_prefix: str) -> None:
+                self.max_workers = max_workers
+                self.thread_name_prefix = thread_name_prefix
+
+            def __enter__(self) -> "RecordingExecutor":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def submit(self, function: object, item: Song) -> CompletedFuture:
+                self.submissions.append(item.song_id)
+                return CompletedFuture(function(item))  # type: ignore[operator]
+
+        observed_in_flight: list[int] = []
+
+        def complete_one(in_flight: object, **_: object) -> tuple[set[object], set[object]]:
+            futures = set(in_flight)  # type: ignore[arg-type]
+            observed_in_flight.append(len(futures))
+            first = next(iter(futures))
+            return {first}, futures - {first}
+
+        many_songs = [song(str(index), f"https://cdn.example.test/{index}") for index in range(8)]
+        with TemporaryDirectory() as directory, self._patch_extraction() as mocked:
+            mocked["download_audio"].side_effect = self.fake_download
+            with patch("competition_emotion.audio_cache.ThreadPoolExecutor", RecordingExecutor), patch(
+                "competition_emotion.audio_cache.wait", side_effect=complete_one
+            ):
+                summary = build_audio_feature_cache(many_songs, Path(directory) / "cache", workers=2)
+
+        self.assertEqual(summary["succeeded"], 8)
+        self.assertEqual(RecordingExecutor.submissions, [str(index) for index in range(8)])
+        self.assertTrue(observed_in_flight)
+        self.assertLessEqual(max(observed_in_flight), 2)
 
     def test_rejects_invalid_batch_configuration_before_downloading(self) -> None:
         duplicate = [self.songs[0], song(self.songs[0].song_id, "https://cdn.example.test/new")]
