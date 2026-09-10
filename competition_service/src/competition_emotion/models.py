@@ -11,10 +11,11 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
-from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
 from .types import Song
+from .audio import FEATURE_NAMES, feature_vector
 
 
 _SCHEMA_VERSION = 2
@@ -156,6 +157,109 @@ class TextScorer:
         if not np.isfinite(probabilities).all() or (probabilities < 0).any() or (probabilities > 1).any():
             raise ValueError("classifier returned invalid probabilities")
         return probabilities
+
+
+@dataclass
+class AudioScorer:
+    labels: tuple[str, ...] = ()
+    scaler: StandardScaler | None = None
+    classifier: OneVsRestClassifier | None = None
+
+    def fit(
+        self,
+        samples: list[tuple[Song, dict[str, float]]],
+        labels: tuple[str, ...],
+    ) -> AudioScorer:
+        configured_labels = _validate_labels(labels)
+        if not samples:
+            raise ValueError("samples must be nonempty")
+        configured_label_set = set(configured_labels)
+        unknown_labels = {
+            label for song, _ in samples for label in song.labels if label not in configured_label_set
+        }
+        if unknown_labels:
+            raise ValueError(
+                "songs contain labels outside the configuration: "
+                + ", ".join(sorted(map(str, unknown_labels)))
+            )
+        if len(configured_labels) == 1:
+            raise ValueError("a one-label configuration cannot provide real negatives")
+
+        song_ids = [song.song_id for song, _ in samples]
+        if len(song_ids) != len(set(song_ids)):
+            raise ValueError("duplicated song ID in audio samples")
+        matrix = np.vstack([self._validated_feature_vector(features) for _, features in samples])
+
+        encoder = MultiLabelBinarizer(classes=configured_labels)
+        targets = encoder.fit_transform([song.labels for song, _ in samples])
+        unsupported = [
+            label
+            for index, label in enumerate(configured_labels)
+            if not targets[:, index].any() or targets[:, index].all()
+        ]
+        if unsupported:
+            raise ValueError(
+                "labels require both positive and negative training examples: "
+                + ", ".join(unsupported)
+            )
+
+        scaler = StandardScaler()
+        normalized = scaler.fit_transform(matrix)
+        classifier = OneVsRestClassifier(
+            LogisticRegression(max_iter=1000, class_weight="balanced", solver="liblinear")
+        )
+        classifier.fit(normalized, targets)
+        self.labels = configured_labels
+        self.scaler = scaler
+        self.classifier = classifier
+        return self
+
+    def score(self, features: dict[str, float]) -> dict[str, float]:
+        probabilities = self.score_many([features])
+        return {
+            label: float(probability)
+            for label, probability in zip(self.labels, probabilities[0], strict=True)
+        }
+
+    def score_many(self, features: list[dict[str, float]]) -> np.ndarray:
+        scaler, classifier = self._fitted_components()
+        if not features:
+            return np.empty((0, len(self.labels)), dtype=float)
+        matrix = np.vstack([self._validated_feature_vector(record) for record in features])
+        probabilities = np.asarray(classifier.predict_proba(scaler.transform(matrix)), dtype=float)
+        if probabilities.shape != (len(features), len(self.labels)):
+            raise ValueError("classifier probabilities do not match configured labels")
+        if not np.isfinite(probabilities).all() or (probabilities < 0).any() or (probabilities > 1).any():
+            raise ValueError("classifier returned invalid probabilities")
+        return probabilities
+
+    def _fitted_components(self) -> tuple[StandardScaler, OneVsRestClassifier]:
+        _validate_labels(self.labels)
+        if self.scaler is None or self.classifier is None:
+            raise ValueError("AudioScorer has not been fitted")
+        try:
+            check_is_fitted(self.scaler)
+            check_is_fitted(self.classifier)
+            if len(self.classifier.estimators_) != len(self.labels):
+                raise ValueError("classifier estimators do not match configured labels")
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("AudioScorer has not been fitted") from error
+        return self.scaler, self.classifier
+
+    @staticmethod
+    def _validated_feature_vector(features: dict[str, float]) -> np.ndarray:
+        vector = feature_vector(features)
+        bounds = {
+            "rms_db": (-300.0, 20.0),
+            "zero_crossing_rate": (0.0, 1.0),
+            "spectral_centroid_hz": (0.0, 24_000.0),
+            "dynamic_range_db": (0.0, 300.0),
+        }
+        for value, name in zip(vector, FEATURE_NAMES, strict=True):
+            lower, upper = bounds[name]
+            if not lower <= value <= upper:
+                raise ValueError(f"feature {name} is out of range")
+        return vector
 
 
 def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
