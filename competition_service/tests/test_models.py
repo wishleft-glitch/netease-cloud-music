@@ -74,6 +74,21 @@ class TextScorerTests(unittest.TestCase):
 
         self.assertEqual(scores.shape, (0, len(LABELS)))
 
+    def test_single_label_configuration_trains_on_all_positive_records(self) -> None:
+        scorer = TextScorer().fit(
+            [
+                song("1", {"孤独"}, "一个人", "一个人 孤独"),
+                song("2", {"孤独"}, "空房间", "寂寞 夜晚"),
+            ],
+            ("孤独",),
+        )
+
+        scores = scorer.score_many(["一个人孤独没有你"])
+
+        self.assertEqual(scores.shape, (1, 1))
+        self.assertEqual(tuple(scorer.score("一个人孤独没有你")), ("孤独",))
+        self.assertTrue(np.isfinite(scores[0, 0]) and 0.0 <= scores[0, 0] <= 1.0)
+
     def test_fit_rejects_labels_with_only_one_class(self) -> None:
         songs = [
             song("1", {"狂欢", "孤独"}, "a", "party alone"),
@@ -81,6 +96,25 @@ class TextScorerTests(unittest.TestCase):
         ]
 
         with self.assertRaisesRegex(ValueError, "狂欢.*孤独"):
+            TextScorer().fit(songs, LABELS)
+
+    def test_fit_rejects_missing_label_for_multilabel_configuration(self) -> None:
+        songs = [
+            song("1", {"狂欢"}, "a", "party"),
+            song("2", set(), "b", "quiet"),
+            song("3", set(), "c", "still"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "孤独"):
+            TextScorer().fit(songs, LABELS)
+
+    def test_fit_rejects_song_labels_outside_the_configuration(self) -> None:
+        songs = [
+            song("1", {"狂欢", "未知"}, "a", "party"),
+            song("2", {"孤独"}, "b", "lonely"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "未知"):
             TextScorer().fit(songs, LABELS)
 
     def test_fit_rejects_invalid_labels_and_empty_song_list(self) -> None:
@@ -129,6 +163,15 @@ class TextScorerTests(unittest.TestCase):
                         "classifier": self.scorer.classifier,
                     },
                     "labels",
+                ),
+                (
+                    {
+                        "schema_version": 1,
+                        "labels": ("狂欢",),
+                        "vectorizer": self.scorer.vectorizer,
+                        "classifier": self.scorer.classifier,
+                    },
+                    "components",
                 ),
             )
             for payload, message in invalid_payloads:

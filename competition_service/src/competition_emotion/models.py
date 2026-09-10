@@ -6,6 +6,7 @@ from typing import Any
 
 import joblib
 import numpy as np
+from scipy.sparse import vstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
@@ -51,14 +52,26 @@ class TextScorer:
         configured_labels = _validate_labels(labels)
         if not songs:
             raise ValueError("songs must be nonempty")
+        configured_label_set = set(configured_labels)
+        unknown_labels = {
+            label for song in songs for label in song.labels if label not in configured_label_set
+        }
+        if unknown_labels:
+            raise ValueError(
+                "songs contain labels outside the configuration: "
+                + ", ".join(sorted(map(str, unknown_labels)))
+            )
 
         encoder = MultiLabelBinarizer(classes=configured_labels)
         targets = encoder.fit_transform([song.labels for song in songs])
-        unsupported = [
-            label
-            for index, label in enumerate(configured_labels)
-            if not targets[:, index].any() or targets[:, index].all()
-        ]
+        if len(configured_labels) == 1:
+            unsupported = [] if targets[:, 0].any() else [configured_labels[0]]
+        else:
+            unsupported = [
+                label
+                for index, label in enumerate(configured_labels)
+                if not targets[:, index].any() or targets[:, index].all()
+            ]
         if unsupported:
             raise ValueError(
                 "labels require both positive and negative training examples: "
@@ -80,7 +93,14 @@ class TextScorer:
                 solver="liblinear",
             )
         )
-        classifier.fit(features, targets)
+        training_features = features
+        training_targets = targets
+        if len(configured_labels) == 1 and targets[:, 0].all():
+            training_features = vstack(
+                [features, vectorizer.transform([_EMPTY_TEXT_SENTINEL])]
+            )
+            training_targets = np.vstack([targets, [[0]]])
+        classifier.fit(training_features, training_targets)
 
         self.labels = configured_labels
         self.vectorizer = vectorizer
@@ -99,12 +119,7 @@ class TextScorer:
         if not texts:
             return np.empty((0, len(self.labels)), dtype=float)
         features = vectorizer.transform([_text_or_sentinel(text) for text in texts])
-        probabilities = np.asarray(classifier.predict_proba(features), dtype=float)
-        if probabilities.shape != (len(texts), len(self.labels)):
-            raise ValueError("classifier probabilities do not match configured labels")
-        if not np.isfinite(probabilities).all() or (probabilities < 0).any() or (probabilities > 1).any():
-            raise ValueError("classifier returned invalid probabilities")
-        return probabilities
+        return self._classifier_probabilities(classifier, features, len(texts))
 
     def _fitted_components(self) -> tuple[TfidfVectorizer, OneVsRestClassifier]:
         _validate_labels(self.labels)
@@ -113,9 +128,32 @@ class TextScorer:
         try:
             check_is_fitted(self.vectorizer)
             check_is_fitted(self.classifier)
+            if len(self.classifier.estimators_) != len(self.labels):
+                raise ValueError("classifier estimators do not match configured labels")
+            probe = self.vectorizer.transform([_EMPTY_TEXT_SENTINEL])
+            self._classifier_probabilities(self.classifier, probe, 1)
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError("TextScorer has not been fitted") from error
         return self.vectorizer, self.classifier
+
+    def _classifier_probabilities(
+        self,
+        classifier: OneVsRestClassifier,
+        features: Any,
+        rows: int,
+    ) -> np.ndarray:
+        probabilities = np.asarray(classifier.predict_proba(features), dtype=float)
+        if len(self.labels) == 1:
+            classes = np.asarray(getattr(classifier, "classes_", ()))
+            positive_indices = np.flatnonzero(classes == 1)
+            if probabilities.shape != (rows, len(classes)) or len(positive_indices) != 1:
+                raise ValueError("classifier probabilities do not match configured labels")
+            probabilities = probabilities[:, positive_indices]
+        if probabilities.shape != (rows, len(self.labels)):
+            raise ValueError("classifier probabilities do not match configured labels")
+        if not np.isfinite(probabilities).all() or (probabilities < 0).any() or (probabilities > 1).any():
+            raise ValueError("classifier returned invalid probabilities")
+        return probabilities
 
 
 def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
