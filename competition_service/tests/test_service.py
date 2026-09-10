@@ -55,10 +55,15 @@ def _write_bundle(root: Path) -> Path:
     (version_dir / "report.json").write_text(
         json.dumps(
             {
-                "report_schema_version": 1,
+                "report_schema_version": 2,
                 "model_type": "lyrics_tfidf_logreg",
                 "model_version": "test-v1",
                 "labels": list(LABELS),
+                "source": {
+                    "file_name": "official.xlsx",
+                    "sha256": "a" * 64,
+                    "rows": 1,
+                },
             },
             ensure_ascii=False,
         ),
@@ -545,6 +550,22 @@ class ServiceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "changed while opening"):
                     create_app(root)
             self.assertTrue(replaced)
+            loader.assert_not_called()
+
+
+class BundleSchemaTests(unittest.TestCase):
+    def test_old_schema_report_is_refused_before_model_deserialization(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = _write_bundle(Path(directory) / "bundle")
+            report_path = root / "versions" / "test-version" / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["report_schema_version"] = 1
+            report.pop("source")
+            report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+            with patch("competition_emotion.service.load_text_scorer") as loader:
+                with self.assertRaisesRegex(ValueError, "unsupported bundle report schema"):
+                    create_app(root)
             loader.assert_not_called()
 
 

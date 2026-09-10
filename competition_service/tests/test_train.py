@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -48,9 +49,17 @@ class TrainTextBaselineTests(unittest.TestCase):
                 workbook, bundle_dir, labels=LABELS, seed=19, test_ratio=0.25
             )
 
-            self.assertEqual(report["report_schema_version"], 1)
+            self.assertEqual(report["report_schema_version"], 2)
             self.assertEqual(report["model_type"], "lyrics_tfidf_logreg")
             self.assertEqual(report["labels"], list(LABELS))
+            self.assertEqual(
+                report["source"],
+                {
+                    "file_name": "official.xlsx",
+                    "sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+                    "rows": 13,
+                },
+            )
             self.assertEqual(report["counts"]["total_songs"], 12)
             self.assertEqual(report["counts"]["train_songs"], 9)
             self.assertEqual(report["counts"]["test_songs"], 3)

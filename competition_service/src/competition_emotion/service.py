@@ -332,6 +332,20 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
     )
     if report.get("report_schema_version") != REPORT_SCHEMA_VERSION:
         raise ValueError("unsupported bundle report schema")
+    source = report.get("source")
+    if (
+        not isinstance(source, dict)
+        or set(source) != {"file_name", "sha256", "rows"}
+        or not isinstance(source["file_name"], str)
+        or not source["file_name"].strip()
+        or not isinstance(source["sha256"], str)
+        or len(source["sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in source["sha256"])
+        or not isinstance(source["rows"], int)
+        or isinstance(source["rows"], bool)
+        or source["rows"] < 0
+    ):
+        raise ValueError("invalid bundle report source provenance")
     if report.get("model_type") != MODEL_TYPE:
         raise ValueError("bundle model type is not supported by this service")
     model_version = report.get("model_version")
