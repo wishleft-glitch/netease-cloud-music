@@ -4,6 +4,7 @@ import json
 import os
 import asyncio
 from pathlib import Path
+from shutil import copyfile
 import stat
 from tempfile import TemporaryDirectory
 from time import perf_counter
@@ -13,23 +14,39 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 import numpy as np
 
+from competition_emotion.constants import LABELS
 from competition_emotion.models import TextScorer, save_text_scorer
 from competition_emotion.service import MAX_REQUEST_BODY_BYTES, create_app
 from competition_emotion.types import Song
 
 
-LABELS = ("狂欢", "孤独")
-
-
 def _write_bundle(root: Path) -> Path:
     version_dir = root / "versions" / "test-version"
     version_dir.mkdir(parents=True)
-    songs = [
-        Song("1", frozenset({"狂欢"}), "派对", "甲", "流行", "跳舞 欢呼 热闹", ""),
-        Song("2", frozenset({"狂欢"}), "庆祝", "乙", "流行", "派对 狂欢 开心", ""),
-        Song("3", frozenset({"孤独"}), "夜晚", "丙", "流行", "一个人 寂寞 孤单", ""),
-        Song("4", frozenset({"孤独"}), "离开", "丁", "流行", "无人 陪伴 安静", ""),
-    ]
+    songs: list[Song] = []
+    for index, label in enumerate(LABELS):
+        songs.extend(
+            (
+                Song(
+                    str(index * 2 + 1),
+                    frozenset({label}),
+                    f"{label}歌曲",
+                    "测试艺人",
+                    "测试专辑",
+                    f"{label} 情绪文本 {index}",
+                    "",
+                ),
+                Song(
+                    str(index * 2 + 2),
+                    frozenset(),
+                    f"中性歌曲{index}",
+                    "测试艺人",
+                    "测试专辑",
+                    f"中性文本 {index}",
+                    "",
+                ),
+            )
+        )
     scorer = TextScorer().fit(songs, LABELS)
     save_text_scorer(scorer, version_dir / "model.joblib")
     (version_dir / "report.json").write_text(
@@ -73,18 +90,23 @@ class ServiceTests(unittest.TestCase):
         request.update(overrides)
         return request
 
+    def _scores(self, **overrides: float) -> dict[str, float]:
+        scores = {label: 0.01 for label in LABELS}
+        scores.update(overrides)
+        return scores
+
     def test_health_and_official_recognition_envelope_with_rounding_and_tie_order(self) -> None:
         health = self.client.get("/healthz")
         self.assertEqual(health.status_code, 200)
         self.assertEqual(
             health.json(),
-            {"ready": True, "model_type": "lyrics_tfidf_logreg", "model_version": "test-v1", "label_count": 2},
+            {"ready": True, "model_type": "lyrics_tfidf_logreg", "model_version": "test-v1", "label_count": 15},
         )
 
         with patch.object(
             self.app.state.runtime.scorer,
             "score",
-            return_value={"狂欢": 0.123456, "孤独": 0.123455},
+            return_value=self._scores(狂欢=0.123456, 孤独=0.123455),
         ):
             started = perf_counter()
             response = self.client.post(
@@ -117,7 +139,7 @@ class ServiceTests(unittest.TestCase):
         with patch.object(
             self.app.state.runtime.scorer,
             "score",
-            return_value={"孤独": 0.5, "狂欢": 0.5},
+            return_value=self._scores(孤独=0.5, 狂欢=0.5),
         ):
             response = self.client.post("/api/v1/emotion/recognize", json=self._request())
         self.assertEqual(response.status_code, 200)
@@ -127,7 +149,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(response.json()["data"]["second_confidence"], 0.5)
 
     def test_required_only_request_reports_song_name_as_the_only_evidence(self) -> None:
-        with patch.object(self.app.state.runtime.scorer, "score", return_value={"狂欢": 0.8, "孤独": 0.2}) as score:
+        with patch.object(self.app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)) as score:
             response = self.client.post(
                 "/api/v1/emotion/recognize",
                 json={
@@ -143,7 +165,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("艺人", evidence)
 
     def test_lyrical_request_evidence_excludes_song_name_and_artist(self) -> None:
-        with patch.object(self.app.state.runtime.scorer, "score", return_value={"狂欢": 0.8, "孤独": 0.2}) as score:
+        with patch.object(self.app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)) as score:
             response = self.client.post(
                 "/api/v1/emotion/recognize",
                 json=self._request(text_lyric="任意歌词"),
@@ -182,11 +204,11 @@ class ServiceTests(unittest.TestCase):
     def test_rejects_invalid_scores_before_selecting_a_winner(self) -> None:
         failing_client = TestClient(self.app, raise_server_exceptions=False)
         invalid_results = (
-            {"狂欢": float("nan"), "孤独": float("nan")},
-            {"狂欢": 0.8, "孤独": True},
-            {"狂欢": 0.8, "孤独": np.bool_(True)},
-            {"狂欢": 0.8, "孤独": 1.1},
-            {"狂欢": 0.8, "孤独": -0.1},
+            {label: float("nan") for label in LABELS},
+            self._scores(狂欢=0.8, 孤独=True),
+            self._scores(狂欢=0.8, 孤独=np.bool_(True)),
+            self._scores(狂欢=0.8, 孤独=1.1),
+            self._scores(狂欢=0.8, 孤独=-0.1),
         )
         for scores in invalid_results:
             with self.subTest(scores=repr(scores)), patch.object(
@@ -252,7 +274,31 @@ class ServiceTests(unittest.TestCase):
             report = json.loads(report_path.read_text(encoding="utf-8"))
             report["labels"] = ["孤独", "狂欢"]
             report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "labels do not match"):
+            with self.assertRaisesRegex(ValueError, "official labels"):
+                create_app(root)
+
+    def test_nonofficial_label_bundle_is_refused_at_initialization(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = _write_bundle(Path(directory) / "bundle")
+            version_dir = root / "versions" / "test-version"
+            nonofficial_labels = ("狂欢", "孤独")
+            save_text_scorer(
+                TextScorer().fit(
+                    [
+                        Song("a", frozenset({"狂欢"}), "a", "", "", "欢呼", ""),
+                        Song("b", frozenset(), "b", "", "", "中性", ""),
+                        Song("c", frozenset({"孤独"}), "c", "", "", "孤单", ""),
+                        Song("d", frozenset(), "d", "", "", "平静", ""),
+                    ],
+                    nonofficial_labels,
+                ),
+                version_dir / "model.joblib",
+            )
+            report_path = version_dir / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["labels"] = list(nonofficial_labels)
+            report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "official labels"):
                 create_app(root)
 
     def test_raw_symlink_bundle_root_is_refused_at_initialization(self) -> None:
@@ -282,18 +328,7 @@ class ServiceTests(unittest.TestCase):
             version_dir = root / "versions" / "test-version"
             model_path = version_dir / "model.joblib"
             replacement_path = version_dir / "replacement.joblib"
-            save_text_scorer(
-                TextScorer().fit(
-                    [
-                        Song("a", frozenset({"狂欢"}), "a", "", "", "热闹", ""),
-                        Song("b", frozenset({"孤独"}), "b", "", "", "孤单", ""),
-                        Song("c", frozenset({"狂欢"}), "c", "", "", "欢呼", ""),
-                        Song("d", frozenset({"孤独"}), "d", "", "", "寂寞", ""),
-                    ],
-                    LABELS,
-                ),
-                replacement_path,
-            )
+            copyfile(model_path, replacement_path)
             real_open = os.open
             replaced = False
 

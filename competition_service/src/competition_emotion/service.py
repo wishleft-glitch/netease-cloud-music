@@ -25,6 +25,7 @@ import uvicorn
 import numpy as np
 
 from .models import TextScorer, load_text_scorer
+from .constants import LABELS
 from .evidence import build_evidence
 from .lyrics import compose_lyrics
 from .train import BUNDLE_POINTER_SCHEMA_VERSION, MODEL_TYPE, REPORT_SCHEMA_VERSION
@@ -279,6 +280,8 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
         or len(set(report_labels)) != len(report_labels)
     ):
         raise ValueError("invalid bundle report configuration")
+    if tuple(report_labels) != LABELS:
+        raise ValueError("bundle report labels do not match official labels")
 
     # The operator selects this bundle directory; request bodies never control
     # a model path.  Joblib remains intentionally opt-in at this boundary.
@@ -287,6 +290,8 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
             scorer = load_text_scorer(model_file, trusted=True)
         except ValueError as error:
             raise ValueError("invalid active bundle model artifact") from error
+    if scorer.labels != LABELS:
+        raise ValueError("bundle model labels do not match official labels")
     if tuple(report_labels) != scorer.labels:
         raise ValueError("bundle report labels do not match the model")
     return _Runtime(scorer=scorer, model_type=MODEL_TYPE, model_version=model_version)
