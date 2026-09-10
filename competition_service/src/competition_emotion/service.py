@@ -316,6 +316,7 @@ def create_app(bundle_root: Path) -> FastAPI:
         lyric_text = compose_lyrics(
             request.text_lyric, request.lrc_lyric, request.lrc_translation
         )
+        lyric_used = bool(lyric_text)
         song = Song(
             song_id=request.song_id,
             labels=frozenset(),
@@ -325,7 +326,7 @@ def create_app(bundle_root: Path) -> FastAPI:
             text=lyric_text,
             audio_url=request.audio_url,
         )
-        scores = runtime.scorer.score(song.text.strip() or song.name)
+        scores = runtime.scorer.score(song.text if lyric_used else song.name)
         if not isinstance(scores, dict) or set(scores) != set(runtime.scorer.labels):
             raise RuntimeError("model returned invalid scores")
         ranked: list[tuple[str, float]] = []
@@ -342,9 +343,8 @@ def create_app(bundle_root: Path) -> FastAPI:
         ranked.sort(key=lambda item: item[1], reverse=True)
         (top_emotion, top_confidence), (second_emotion, second_confidence) = ranked[:2]
         evidence = build_evidence(
-            text_lyric=request.text_lyric,
-            lrc_lyric=request.lrc_lyric,
-            lrc_translation=request.lrc_translation,
+            lyric_used=lyric_used,
+            title_used=not lyric_used,
         )
         return RecognizeResponse(
             code=200,

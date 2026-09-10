@@ -103,7 +103,7 @@ class ServiceTests(unittest.TestCase):
                     "top_confidence": 0.1235,
                     "second_emotion": "孤独",
                     "second_confidence": 0.1235,
-                    "evidence": "基于歌曲名称、艺人及可用歌词文本进行情绪判定。",
+                    "evidence": "基于可用歌词文本进行情绪判定。",
                     "cost_ms": response.json()["data"]["cost_ms"],
                 },
                 "error": "",
@@ -126,12 +126,34 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(response.json()["data"]["top_confidence"], 0.5)
         self.assertEqual(response.json()["data"]["second_confidence"], 0.5)
 
-    def test_uses_song_name_as_model_text_only_when_composed_lyrics_are_empty(self) -> None:
+    def test_required_only_request_reports_song_name_as_the_only_evidence(self) -> None:
         with patch.object(self.app.state.runtime.scorer, "score", return_value={"狂欢": 0.8, "孤独": 0.2}) as score:
-            response = self.client.post("/api/v1/emotion/recognize", json=self._request())
+            response = self.client.post(
+                "/api/v1/emotion/recognize",
+                json={
+                    "audio_url": "https://example.test/audio.mp3",
+                    "song_name": "新歌",
+                    "song_id": "abc",
+                },
+            )
         self.assertEqual(response.status_code, 200)
         score.assert_called_once_with("新歌")
-        self.assertEqual(response.json()["data"]["evidence"], "仅基于歌曲名称和艺人元数据进行情绪判定。")
+        evidence = response.json()["data"]["evidence"]
+        self.assertEqual(evidence, "仅基于歌曲名称进行情绪判定。")
+        self.assertNotIn("艺人", evidence)
+
+    def test_lyrical_request_evidence_excludes_song_name_and_artist(self) -> None:
+        with patch.object(self.app.state.runtime.scorer, "score", return_value={"狂欢": 0.8, "孤独": 0.2}) as score:
+            response = self.client.post(
+                "/api/v1/emotion/recognize",
+                json=self._request(text_lyric="任意歌词"),
+            )
+        self.assertEqual(response.status_code, 200)
+        score.assert_called_once_with("任意歌词")
+        evidence = response.json()["data"]["evidence"]
+        self.assertEqual(evidence, "基于可用歌词文本进行情绪判定。")
+        self.assertNotIn("歌曲名称", evidence)
+        self.assertNotIn("艺人", evidence)
 
     def test_request_validation_has_official_400_envelope(self) -> None:
         malformed = (

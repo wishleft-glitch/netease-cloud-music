@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from .lyrics import compose_lyrics
-
-
-_LYRIC_EVIDENCE = "基于歌曲名称、艺人及可用歌词文本进行情绪判定。"
-_METADATA_EVIDENCE = "仅基于歌曲名称和艺人元数据进行情绪判定。"
+_LYRIC_EVIDENCE = "基于可用歌词文本进行情绪判定。"
+_TITLE_EVIDENCE = "仅基于歌曲名称进行情绪判定。"
 
 
 def build_evidence(
-    *, text_lyric: object, lrc_lyric: object, lrc_translation: object
+    *, lyric_used: bool, title_used: bool
 ) -> str:
-    """Describe only inputs that contributed without exposing lyric content."""
-    if compose_lyrics(text_lyric, lrc_lyric, lrc_translation):
+    """Describe the single input actually sent to the text scorer."""
+    if lyric_used and not title_used:
         return _LYRIC_EVIDENCE
-    return _METADATA_EVIDENCE
+    if title_used and not lyric_used:
+        return _TITLE_EVIDENCE
+    raise ValueError("evidence requires exactly one scored input")
