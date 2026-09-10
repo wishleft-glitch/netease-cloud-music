@@ -9,6 +9,7 @@ import numpy as np
 
 from competition_emotion.audio import (
     FEATURE_NAMES,
+    MAX_PCM_BYTES,
     decode_audio,
     download_audio,
     feature_vector,
@@ -34,15 +35,33 @@ def song(song_id: str, labels: set[str]) -> Song:
 
 
 class DownloadAudioTests(unittest.TestCase):
+    @staticmethod
+    def public_resolution(*_: object, **__: object) -> list[tuple[object, ...]]:
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    @staticmethod
+    def stream_response(
+        chunks: tuple[bytes, ...] = (b"audio",), *, status_code: int = 200, location: str | None = None
+    ) -> MagicMock:
+        response = MagicMock()
+        response.status_code = status_code
+        response.headers = {} if location is None else {"Location": location}
+        response.iter_bytes.return_value = iter(chunks)
+        return response
+
     def test_download_rejects_oversized_stream_and_keeps_existing_destination(self) -> None:
         response = MagicMock()
+        response.status_code = 200
+        response.headers = {}
         response.iter_bytes.return_value = iter((b"abc", b"def"))
         context = MagicMock()
         context.__enter__.return_value = response
         with TemporaryDirectory() as directory:
             destination = Path(directory) / "track.bin"
             destination.write_bytes(b"old")
-            with patch("competition_emotion.audio.httpx.stream", return_value=context):
+            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
+                "competition_emotion.audio.httpx.stream", return_value=context
+            ):
                 with self.assertRaisesRegex(ValueError, "maximum"):
                     download_audio("https://example.test/music", destination, max_bytes=5)
 
@@ -53,6 +72,77 @@ class DownloadAudioTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "http"):
                 download_audio("file:///secret", Path(directory) / "track.bin")
+
+    def test_download_rejects_private_resolution_without_request(self) -> None:
+        private_and_public = [
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+            (2, 1, 6, "", ("127.0.0.1", 0)),
+        ]
+        with TemporaryDirectory() as directory:
+            with patch("competition_emotion.audio.socket.getaddrinfo", return_value=private_and_public), patch(
+                "competition_emotion.audio.httpx.stream"
+            ) as stream:
+                with self.assertRaisesRegex(ValueError, "public"):
+                    download_audio("https://localhost/music", Path(directory) / "track.bin")
+        stream.assert_not_called()
+
+    def test_redirect_target_is_validated_before_any_request(self) -> None:
+        source = self.stream_response(status_code=302, location="http://127.0.0.1/private")
+        context = MagicMock()
+        context.__enter__.return_value = source
+        with TemporaryDirectory() as directory:
+            with patch(
+                "competition_emotion.audio.socket.getaddrinfo",
+                side_effect=[self.public_resolution(), [(2, 1, 6, "", ("127.0.0.1", 0))]],
+            ), patch("competition_emotion.audio.httpx.stream", return_value=context) as stream:
+                with self.assertRaisesRegex(ValueError, "public"):
+                    download_audio("https://example.test/signed?token=abc", Path(directory) / "track.bin")
+
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual(stream.call_args.args[1], "https://example.test/signed?token=abc")
+
+    def test_redirect_without_location_is_rejected_even_at_redirect_limit(self) -> None:
+        contexts = []
+        for location in ("/one?signature=1", "/two?signature=2", "/three?signature=3", None):
+            context = MagicMock()
+            context.__enter__.return_value = self.stream_response(status_code=302, location=location)
+            contexts.append(context)
+
+        with TemporaryDirectory() as directory:
+            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
+                "competition_emotion.audio.httpx.stream", side_effect=contexts
+            ):
+                with self.assertRaisesRegex(ValueError, "missing Location"):
+                    download_audio("https://example.test/music?signature=origin", Path(directory) / "track.bin")
+
+    def test_download_creates_nested_destination_parent(self) -> None:
+        response = self.stream_response()
+        context = MagicMock()
+        context.__enter__.return_value = response
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "new" / "nested" / "track.bin"
+            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
+                "competition_emotion.audio.httpx.stream", return_value=context
+            ):
+                result = download_audio("https://example.test/music", destination)
+            self.assertEqual(result, destination)
+            self.assertEqual(destination.read_bytes(), b"audio")
+
+    def test_download_enforces_total_deadline_across_chunks(self) -> None:
+        response = self.stream_response((b"a", b"b"))
+        context = MagicMock()
+        context.__enter__.return_value = response
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "track.bin"
+            destination.write_bytes(b"old")
+            with patch("competition_emotion.audio.socket.getaddrinfo", side_effect=self.public_resolution), patch(
+                "competition_emotion.audio.httpx.stream", return_value=context
+            ), patch("competition_emotion.audio.time.monotonic", side_effect=(0.0, 0.1, 0.2, 1.1)):
+                with self.assertRaisesRegex(TimeoutError, "total timeout"):
+                    download_audio("https://example.test/music", destination, timeout_seconds=1.0)
+
+            self.assertEqual(destination.read_bytes(), b"old")
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
 
 
 class DecodeAudioTests(unittest.TestCase):
@@ -101,6 +191,17 @@ class DecodeAudioTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "duration"):
                     decode_audio(path, max_seconds=1, sample_rate=8000)
 
+    def test_decode_rejects_pcm_estimate_before_starting_ffmpeg(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "track.mp3"
+            path.write_bytes(b"input")
+            with patch("competition_emotion.audio.subprocess.run") as run:
+                with self.assertRaisesRegex(ValueError, "PCM"):
+                    decode_audio(path, max_seconds=600, sample_rate=48000)
+
+        self.assertLess(MAX_PCM_BYTES, 600 * 48000 * 4)
+        run.assert_not_called()
+
 
 class FeatureTests(unittest.TestCase):
     def test_sine_features_are_finite_and_vector_uses_fixed_order(self) -> None:
@@ -119,6 +220,25 @@ class FeatureTests(unittest.TestCase):
         features = measured_features(np.zeros(512, dtype=np.float32), 22050)
 
         self.assertEqual(features["dynamic_range_db"], 0.0)
+
+    def test_leading_silence_and_constant_tone_has_stable_dynamic_range(self) -> None:
+        sample_rate = 8000
+        waveform = np.concatenate(
+            (np.zeros(sample_rate // 2, dtype=np.float32), np.full(sample_rate * 3 // 2, 0.5, dtype=np.float32))
+        )
+
+        features = measured_features(waveform, sample_rate)
+
+        self.assertEqual(features["dynamic_range_db"], 0.0)
+
+    def test_extra_long_waveform_uses_a_bounded_feature_window(self) -> None:
+        sample_rate = 8000
+        waveform = np.sin(2 * np.pi * 200 * np.arange(sample_rate * 46) / sample_rate).astype(np.float32)
+        with patch("competition_emotion.audio.np.fft.rfft", wraps=np.fft.rfft) as rfft:
+            features = measured_features(waveform, sample_rate)
+
+        self.assertTrue(all(np.isfinite(value) for value in features.values()))
+        self.assertEqual(rfft.call_args.args[0].size, sample_rate * 45)
 
     def test_feature_functions_reject_invalid_inputs(self) -> None:
         with self.assertRaises(ValueError):

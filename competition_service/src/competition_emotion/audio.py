@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
+import socket
 import subprocess
 from tempfile import NamedTemporaryFile
+import time
 from typing import Mapping
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import numpy as np
@@ -17,6 +20,9 @@ FEATURE_NAMES = (
     "spectral_centroid_hz",
     "dynamic_range_db",
 )
+MAX_REDIRECTS = 3
+MAX_PCM_BYTES = 16_000_000
+MAX_FEATURE_SECONDS = 45
 
 
 def download_audio(
@@ -28,9 +34,6 @@ def download_audio(
     """Download an HTTP(S) audio payload without replacing a prior file on failure."""
     if not isinstance(url, str) or not url.strip():
         raise ValueError("audio URL must be a nonblank http or https URL")
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("audio URL must be a nonblank http or https URL")
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
     if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
@@ -38,7 +41,9 @@ def download_audio(
 
     target = Path(destination)
     temporary_path: Path | None = None
+    deadline = time.monotonic() + timeout_seconds
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile(
             mode="wb",
             delete=False,
@@ -48,17 +53,33 @@ def download_audio(
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
             total = 0
-            with httpx.stream(
-                "GET", url, follow_redirects=True, timeout=timeout_seconds
-            ) as response:
-                response.raise_for_status()
-                for chunk in response.iter_bytes():
-                    if not chunk:
+            current_url = url
+            for redirects in range(MAX_REDIRECTS + 1):
+                _validate_public_http_url(current_url)
+                remaining = _remaining_download_time(deadline)
+                with httpx.stream(
+                    "GET", current_url, follow_redirects=False, timeout=remaining
+                ) as response:
+                    if 300 <= response.status_code < 400:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError("audio redirect is missing Location")
+                        if redirects == MAX_REDIRECTS:
+                            raise ValueError("audio download exceeded redirect limit")
+                        current_url = urljoin(current_url, location)
                         continue
-                    if total + len(chunk) > max_bytes:
-                        raise ValueError("audio download exceeds maximum size")
-                    temporary_file.write(chunk)
-                    total += len(chunk)
+                    response.raise_for_status()
+                    for chunk in response.iter_bytes():
+                        _remaining_download_time(deadline)
+                        if not chunk:
+                            continue
+                        if total + len(chunk) > max_bytes:
+                            raise ValueError("audio download exceeds maximum size")
+                        temporary_file.write(chunk)
+                        total += len(chunk)
+                    break
+            else:
+                raise ValueError("audio download exceeded redirect limit")
             if total == 0:
                 raise ValueError("audio download is empty")
         os.replace(temporary_path, target)
@@ -85,6 +106,9 @@ def decode_audio(
         raise ValueError("sample_rate must be between 8000 and 48000")
     if not isinstance(ffmpeg_path, str) or not ffmpeg_path.strip():
         raise ValueError("ffmpeg_path must be nonblank")
+    estimated_pcm_bytes = max_seconds * sample_rate * np.dtype(np.float32).itemsize
+    if estimated_pcm_bytes > MAX_PCM_BYTES:
+        raise ValueError("requested PCM output exceeds the maximum PCM byte limit")
 
     command = [
         ffmpeg_path,
@@ -138,7 +162,7 @@ def decode_audio(
 
 
 def measured_features(waveform: np.ndarray, sample_rate: int) -> dict[str, float]:
-    """Compute a fixed, finite feature set from a real decoded waveform."""
+    """Compute features from at most the first 45 seconds of a valid waveform."""
     samples = np.asarray(waveform)
     if samples.ndim != 1 or samples.size < 512 or samples.dtype.kind != "f":
         raise ValueError("waveform must be a one-dimensional float array with at least 512 samples")
@@ -147,8 +171,8 @@ def measured_features(waveform: np.ndarray, sample_rate: int) -> dict[str, float
     if isinstance(sample_rate, bool) or not isinstance(sample_rate, (int, np.integer)) or sample_rate <= 0:
         raise ValueError("sample_rate must be positive")
 
-    values = samples.astype(np.float64, copy=False)
-    amplitude = np.abs(values)
+    window_samples = min(samples.size, int(sample_rate) * MAX_FEATURE_SECONDS)
+    values = samples[:window_samples].astype(np.float64, copy=False)
     rms = float(np.sqrt(np.mean(np.square(values))))
     rms_db = -120.0 if rms == 0.0 else float(20.0 * np.log10(rms))
     zero_crossing_rate = float(np.mean(values[1:] * values[:-1] < 0.0))
@@ -161,14 +185,19 @@ def measured_features(waveform: np.ndarray, sample_rate: int) -> dict[str, float
         frequencies = np.fft.rfftfreq(values.size, d=1.0 / sample_rate)
         spectral_centroid_hz = float(np.dot(frequencies, spectrum) / total_spectrum)
 
-    peak = float(np.max(amplitude))
-    if peak == 0.0:
+    frame_size = max(1, int(sample_rate) // 2)
+    frame_rms = np.asarray(
+        [
+            np.sqrt(np.mean(np.square(values[start : start + frame_size])))
+            for start in range(0, values.size, frame_size)
+        ],
+        dtype=np.float64,
+    )
+    lower, upper = np.percentile(frame_rms, (5.0, 95.0), method="nearest")
+    if lower <= 0.0 or upper <= 0.0 or np.isclose(lower, upper, rtol=1e-7, atol=np.finfo(np.float64).eps):
         dynamic_range_db = 0.0
     else:
-        floor, ceiling = np.percentile(amplitude, (5.0, 95.0))
-        if floor <= 0.0:
-            floor = float(np.min(amplitude[amplitude > 0.0]))
-        dynamic_range_db = max(0.0, float(20.0 * np.log10(ceiling / floor)))
+        dynamic_range_db = max(0.0, float(20.0 * np.log10(upper / lower)))
 
     features = {
         "rms_db": rms_db,
@@ -200,3 +229,47 @@ def _bounded_stderr(stderr: bytes | str | None) -> str:
     if isinstance(stderr, bytes):
         return stderr.decode("utf-8", errors="replace")[:300]
     return str(stderr)[:300]
+
+
+def _validate_public_http_url(url: str) -> None:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("audio URL must be a valid public http or https URL") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("audio URL must be a valid public http or https URL")
+    try:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        raise ValueError("audio URL host could not be resolved") from error
+    if not addresses:
+        raise ValueError("audio URL host could not be resolved")
+    for address in addresses:
+        try:
+            resolved = ipaddress.ip_address(address[4][0])
+        except (IndexError, ValueError) as error:
+            raise ValueError("audio URL host resolved to an invalid address") from error
+        if (
+            resolved.is_loopback
+            or resolved.is_private
+            or resolved.is_link_local
+            or resolved.is_multicast
+            or resolved.is_reserved
+            or resolved.is_unspecified
+            or str(resolved) == "0.0.0.0"
+        ):
+            raise ValueError("audio URL host must resolve only to public addresses")
+
+
+def _remaining_download_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        raise TimeoutError("audio download exceeded total timeout")
+    return remaining
