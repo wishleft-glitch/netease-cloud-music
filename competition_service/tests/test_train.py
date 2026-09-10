@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -36,6 +37,7 @@ class TrainTextBaselineTests(unittest.TestCase):
                     "翻译歌词": "",
                 }
             )
+        rows.append({**rows[0], "情绪类型": "孤独"})
         with TemporaryDirectory() as directory:
             root = Path(directory)
             workbook = root / "official.xlsx"
@@ -53,12 +55,23 @@ class TrainTextBaselineTests(unittest.TestCase):
             self.assertEqual(report["counts"]["train_songs"], 9)
             self.assertEqual(report["counts"]["test_songs"], 3)
             self.assertEqual(report["counts"]["split_group_overlap"], 0)
+            self.assertEqual(report["evaluation_sample_counts"], {
+                "any_positive_sample_count": 3,
+                "strict_singleton_sample_count": 2,
+                "multi_label_sample_count": 1,
+            })
             self.assertIn("strict_top1_accuracy", report["evaluation_metrics"])
             self.assertEqual(set(report["label_support"]["train"]), set(LABELS))
 
-            self.assertTrue((bundle_dir / "model.joblib").is_file())
-            self.assertTrue((bundle_dir / "report.json").is_file())
-            prediction_lines = (bundle_dir / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+            pointer = json.loads((bundle_dir / "current.json").read_text(encoding="utf-8"))
+            version_dir = bundle_dir / pointer["active_bundle"]
+            self.assertEqual(pointer["pointer_schema_version"], 1)
+            self.assertFalse((bundle_dir / "model.joblib").exists())
+            self.assertFalse((bundle_dir / "report.json").exists())
+            self.assertFalse((bundle_dir / "predictions.jsonl").exists())
+            self.assertTrue((version_dir / "model.joblib").is_file())
+            self.assertTrue((version_dir / "report.json").is_file())
+            prediction_lines = (version_dir / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(prediction_lines), 3)
             prediction = json.loads(prediction_lines[0])
             self.assertEqual(
@@ -68,11 +81,26 @@ class TrainTextBaselineTests(unittest.TestCase):
             self.assertNotIn("labels", prediction)
             self.assertEqual(len(prediction["top_labels"]), 2)
             self.assertTrue(0.0 <= prediction["confidence"] <= 1.0)
-            self.assertEqual(json.loads((bundle_dir / "report.json").read_text(encoding="utf-8")), report)
+            self.assertEqual(json.loads((version_dir / "report.json").read_text(encoding="utf-8")), report)
 
-            scorer = load_text_scorer(bundle_dir / "model.joblib", trusted=True)
+            scorer = load_text_scorer(version_dir / "model.joblib", trusted=True)
             self.assertEqual(scorer.labels, LABELS)
             self.assertEqual(set(scorer.score("一个人 寂寞")), set(LABELS))
+
+            with patch("competition_emotion.train._atomic_write_text", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    train_text_baseline(workbook, bundle_dir, labels=LABELS, seed=20, test_ratio=0.25)
+
+            # The failed candidate can exist as an unreachable immutable version,
+            # but every reader still resolves the previous complete bundle.
+            self.assertEqual(
+                json.loads((bundle_dir / "current.json").read_text(encoding="utf-8")),
+                pointer,
+            )
+            self.assertTrue((version_dir / "model.joblib").is_file())
+            self.assertTrue((version_dir / "report.json").is_file())
+            self.assertTrue((version_dir / "predictions.jsonl").is_file())
+            self.assertEqual(list(bundle_dir.glob(".staging-*")), [])
 
 
 if __name__ == "__main__":

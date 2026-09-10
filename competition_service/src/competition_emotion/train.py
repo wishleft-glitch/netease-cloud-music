@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 from tempfile import NamedTemporaryFile
 from typing import Any, Sequence
+from uuid import uuid4
 
 import numpy as np
 
@@ -21,6 +23,7 @@ from .types import Song
 
 REPORT_SCHEMA_VERSION = 1
 MODEL_TYPE = "lyrics_tfidf_logreg"
+BUNDLE_POINTER_SCHEMA_VERSION = 1
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -37,6 +40,14 @@ def _atomic_write_text(path: Path, content: str) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _write_text(path: Path, content: str) -> None:
+    """Write a fully materialized file into an unpublished staging directory."""
+    with path.open("w", encoding="utf-8", newline="") as output:
+        output.write(content)
+        output.flush()
+        os.fsync(output.fileno())
 
 
 def _save_model_atomically(scorer: TextScorer, path: Path) -> None:
@@ -94,6 +105,63 @@ def _prediction_records(
     return records
 
 
+def _publish_bundle(
+    bundle_root: Path,
+    scorer: TextScorer,
+    report: dict[str, Any],
+    predictions: Sequence[dict[str, Any]],
+) -> Path:
+    """Publish a complete immutable bundle by atomically switching one pointer.
+
+    A reader resolves ``current.json`` first.  It therefore sees either the
+    complete previous bundle or the complete new version, never a mixture of
+    model, report, and prediction files from two training runs.
+    """
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    versions_dir = bundle_root / "versions"
+    versions_dir.mkdir(exist_ok=True)
+    bundle_id = uuid4().hex
+    staging_dir = bundle_root / f".staging-{bundle_id}"
+    published_dir = versions_dir / bundle_id
+    staging_dir.mkdir()
+    try:
+        _save_model_atomically(scorer, staging_dir / "model.joblib")
+        _write_text(
+            staging_dir / "report.json",
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        _write_text(
+            staging_dir / "predictions.jsonl",
+            "".join(
+                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                for record in predictions
+            ),
+        )
+        os.replace(staging_dir, published_dir)
+        pointer = {
+            "pointer_schema_version": BUNDLE_POINTER_SCHEMA_VERSION,
+            "active_bundle": f"versions/{bundle_id}",
+        }
+        _atomic_write_text(
+            bundle_root / "current.json",
+            json.dumps(pointer, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    # Earlier development runs used a flat layout.  They are not valid in the
+    # pointer-based contract, so retire them only after the new pointer exists.
+    for legacy_name in ("model.joblib", "report.json", "predictions.jsonl"):
+        legacy_path = bundle_root / legacy_name
+        try:
+            if legacy_path.is_file():
+                legacy_path.unlink()
+        except OSError:
+            # Cleanup cannot make the newly published pointer inconsistent.
+            pass
+    return published_dir
+
+
 def train_text_baseline(
     workbook: Path,
     bundle_dir: Path,
@@ -137,19 +205,15 @@ def train_text_baseline(
             "train": _label_support(train_songs, configured_labels),
             "test": _label_support(test_songs, configured_labels),
         },
+        "evaluation_sample_counts": {
+            "any_positive_sample_count": int(np.any(_targets(test_songs, configured_labels), axis=1).sum()),
+            "strict_singleton_sample_count": int((np.sum(_targets(test_songs, configured_labels), axis=1) == 1).sum()),
+            "multi_label_sample_count": int((np.sum(_targets(test_songs, configured_labels), axis=1) > 1).sum()),
+        },
         "evaluation_metrics": evaluation,
     }
 
-    bundle_dir = Path(bundle_dir)
-    _save_model_atomically(scorer, bundle_dir / "model.joblib")
-    _atomic_write_text(
-        bundle_dir / "report.json",
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-    )
-    _atomic_write_text(
-        bundle_dir / "predictions.jsonl",
-        "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in predictions),
-    )
+    _publish_bundle(Path(bundle_dir), scorer, report, predictions)
     return report
 
 
