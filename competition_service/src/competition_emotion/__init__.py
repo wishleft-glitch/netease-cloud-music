@@ -1,0 +1,1 @@
+"""Competition emotion classification service."""

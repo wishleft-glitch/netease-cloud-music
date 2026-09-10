@@ -1,0 +1,184 @@
+from __future__ import annotations
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+import pandas as pd
+
+from competition_emotion.data import clean_lyric, load_official_songs
+
+
+REQUIRED_COLUMNS = [
+    "歌曲id",
+    "情绪类型",
+    "歌曲名称",
+    "一级曲风标签",
+    "演唱艺人",
+    "文本歌词",
+    "音频下载地址",
+    "lrc歌词（滚词）",
+    "翻译歌词",
+]
+
+
+class OfficialSongLoaderTests(unittest.TestCase):
+    def write_workbook(self, rows: list[dict[str, object]]) -> Path:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "official_songs.xlsx"
+        pd.DataFrame(rows, columns=REQUIRED_COLUMNS).to_excel(path, index=False)
+        return path
+
+    def test_merges_same_song_and_strips_lrc_timestamps(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "10",
+                    "情绪类型": "欢快",
+                    "歌曲名称": "晴天",
+                    "一级曲风标签": "流行",
+                    "演唱艺人": "歌手 A",
+                    "文本歌词": "阳光 正好",
+                    "音频下载地址": "https://audio.example/10",
+                    "lrc歌词（滚词）": "[01:02.34] 微风吹来",
+                    "翻译歌词": "A gentle breeze",
+                },
+                {
+                    "歌曲id": "10",
+                    "情绪类型": "活力",
+                    "歌曲名称": "should not replace",
+                    "一级曲风标签": "摇滚",
+                    "演唱艺人": "other artist",
+                    "文本歌词": "other lyric",
+                    "音频下载地址": "https://audio.example/other",
+                    "lrc歌词（滚词）": "[02:03] other lrc",
+                    "翻译歌词": "other translation",
+                },
+            ]
+        )
+
+        songs = load_official_songs(path)
+
+        self.assertEqual(len(songs), 1)
+        song = songs[0]
+        self.assertEqual(song.labels, frozenset({"欢快", "活力"}))
+        self.assertEqual(song.name, "晴天")
+        self.assertEqual(song.genre, "流行")
+        self.assertEqual(song.audio_url, "https://audio.example/10")
+        self.assertEqual(song.text, "晴天 歌手 A 阳光 正好 微风吹来 A gentle breeze")
+
+    def test_none_lyrics_produce_valid_metadata_text(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "1",
+                    "情绪类型": "平静",
+                    "歌曲名称": "  安静  ",
+                    "一级曲风标签": None,
+                    "演唱艺人": "  某人 ",
+                    "文本歌词": None,
+                    "音频下载地址": None,
+                    "lrc歌词（滚词）": None,
+                    "翻译歌词": None,
+                }
+            ]
+        )
+
+        song = load_official_songs(path)[0]
+
+        self.assertEqual(song.name, "安静")
+        self.assertEqual(song.artists, "某人")
+        self.assertEqual(song.genre, "")
+        self.assertEqual(song.audio_url, "")
+        self.assertEqual(song.text, "安静 某人")
+
+    def test_clean_lyric_removes_timestamps_and_handles_none(self) -> None:
+        self.assertEqual(clean_lyric(" [00:12] hello\n[01:02.34] world "), "hello world")
+        self.assertEqual(clean_lyric(None), "")
+
+    def test_missing_required_header_names_missing_column(self) -> None:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "missing_header.xlsx"
+        pd.DataFrame(
+            [
+                {
+                    "歌曲id": "1",
+                    "情绪类型": "平静",
+                    "歌曲名称": "歌",
+                    "一级曲风标签": "流行",
+                    "演唱艺人": "人",
+                    "文本歌词": "词",
+                    "音频下载地址": "url",
+                    "lrc歌词（滚词）": "lrc",
+                }
+            ]
+        ).to_excel(path, index=False)
+
+        with self.assertRaisesRegex(ValueError, "翻译歌词"):
+            load_official_songs(path)
+
+    def test_skips_empty_ids_and_invalid_labels(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "",
+                    "情绪类型": "欢快",
+                    "歌曲名称": "empty",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                },
+                {
+                    "歌曲id": "3",
+                    "情绪类型": "未知标签",
+                    "歌曲名称": "invalid",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                },
+            ]
+        )
+
+        self.assertEqual(load_official_songs(path), [])
+
+    def test_sorts_numeric_song_ids_numerically(self) -> None:
+        path = self.write_workbook(
+            [
+                {
+                    "歌曲id": "10",
+                    "情绪类型": "欢快",
+                    "歌曲名称": "ten",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                },
+                {
+                    "歌曲id": "2",
+                    "情绪类型": "平静",
+                    "歌曲名称": "two",
+                    "一级曲风标签": "",
+                    "演唱艺人": "",
+                    "文本歌词": "",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                },
+            ]
+        )
+
+        self.assertEqual([song.song_id for song in load_official_songs(path)], ["2", "10"])
+
+
+if __name__ == "__main__":
+    unittest.main()
