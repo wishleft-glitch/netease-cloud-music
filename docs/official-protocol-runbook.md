@@ -63,6 +63,13 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `--semantic-reranker-min-gap` | Local score gap below which review runs | Default 0.10; calibrate on a separate validation set. |
 | `--semantic-reranker-candidate-count` | Number of local candidates supplied to the reviewer | Default 10; valid range 2–15; larger pools improve coverage but increase review ambiguity and prompt size. |
 
+The reviewer endpoint is intentionally small and deterministic to integrate:
+it receives the song fields, lyrics, the Top-10 candidate labels, and their
+Rubric entries; it must return exactly one candidate with `confidence`, a short
+`evidence` string, at least one verbatim `quotes` item found in the supplied
+lyrics, and the corresponding `rule_ids`. Any schema, candidate, quote, or
+rule mismatch is rejected and the local result is retained.
+
 The Dev/calibration manifest is created offline from the fixed Train portion:
 
 ```powershell
