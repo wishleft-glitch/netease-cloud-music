@@ -237,6 +237,51 @@ class TrainTextBaselineTests(unittest.TestCase):
                 "extra.xlsx",
             )
 
+    def test_optional_full_fit_retrains_the_serving_artifact_after_evaluation(self) -> None:
+        rows = []
+        for index in range(12):
+            label = LABELS[index % 2]
+            rows.append(
+                {
+                    "歌曲id": str(index + 1),
+                    "情绪类型": label,
+                    "歌曲名称": f"full fit {index}",
+                    "一级曲风标签": "流行",
+                    "演唱艺人": f"艺人{index}",
+                    "文本歌词": "派对 跳舞 欢呼" if label == "狂欢" else "一个人 夜晚 寂寞",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workbook = root / "official.xlsx"
+            bundle_dir = root / "bundle"
+            pd.DataFrame(rows, columns=REQUIRED_COLUMNS).to_excel(workbook, index=False)
+
+            report = train_text_baseline(
+                workbook,
+                bundle_dir,
+                labels=LABELS,
+                seed=19,
+                test_ratio=0.25,
+                fit_all_for_serving=True,
+            )
+
+            self.assertEqual(
+                report["serving_model_fit"],
+                {
+                    "songs": 12,
+                    "evaluation_holdout_excluded_from_metrics": True,
+                    "selection_report": "evaluation metrics were computed before full-fit serving retrain",
+                },
+            )
+            pointer = json.loads((bundle_dir / "current.json").read_text(encoding="utf-8"))
+            version_dir = bundle_dir / pointer["active_bundle"]
+            scorer = load_text_scorer(version_dir / "model.joblib", trusted=True)
+            self.assertEqual(len(scorer.artist_overrides), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

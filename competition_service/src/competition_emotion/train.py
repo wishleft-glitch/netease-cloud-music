@@ -193,6 +193,7 @@ def train_text_baseline(
     seed: int = 20260910,
     test_ratio: float = 0.2,
     augment_workbook: Path | None = None,
+    fit_all_for_serving: bool = False,
 ) -> dict[str, Any]:
     """Train and evaluate with an official song-group-safe split.
 
@@ -231,9 +232,9 @@ def train_text_baseline(
     if len(official_train_songs) != len(assignment.train_ids) or len(test_songs) != len(assignment.test_ids):
         raise ValueError("split song IDs do not reconcile with the loaded data")
 
-    scorer = TextScorer().fit(train_songs, configured_labels)
-    scores = scorer.score_many([_text_for_score(song) for song in test_songs])
-    scores = scorer.apply_song_overrides_many(test_songs, scores)
+    evaluation_scorer = TextScorer().fit(train_songs, configured_labels)
+    scores = evaluation_scorer.score_many([_text_for_score(song) for song in test_songs])
+    scores = evaluation_scorer.apply_song_overrides_many(test_songs, scores)
     evaluation = metric_report(_targets(test_songs, configured_labels), scores, configured_labels)
     evaluation.update(
         _top_k_metrics(_targets(test_songs, configured_labels), scores, k=2)
@@ -253,12 +254,12 @@ def train_text_baseline(
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "model_type": MODEL_TYPE,
         "model_version": MODEL_VERSION,
-        "model_input_mode": scorer.input_mode,
-        "score_mode": scorer.score_mode,
+        "model_input_mode": evaluation_scorer.input_mode,
+        "score_mode": evaluation_scorer.score_mode,
         "postprocessing": {
             "artist_override_min_songs": 2,
             "artist_override_min_agreement": 0.8,
-            "artist_override_count": len(scorer.artist_overrides),
+            "artist_override_count": len(evaluation_scorer.artist_overrides),
         },
         "source": source,
         "labels": list(configured_labels),
@@ -284,6 +285,16 @@ def train_text_baseline(
     if augmentation_report is not None:
         report["training_augmentation"] = augmentation_report
 
+    scorer = evaluation_scorer
+    if fit_all_for_serving:
+        scorer = TextScorer().fit(songs + augmentation_songs, configured_labels)
+        report["serving_model_fit"] = {
+            "songs": len(songs) + len(augmentation_songs),
+            "evaluation_holdout_excluded_from_metrics": True,
+            "selection_report": "evaluation metrics were computed before full-fit serving retrain",
+        }
+        report["postprocessing"]["artist_override_count"] = len(scorer.artist_overrides)
+
     _publish_bundle(Path(bundle_dir), scorer, report, predictions)
     return report
 
@@ -299,6 +310,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="optional labelled workbook; only song IDs absent from the official source are added",
     )
+    parser.add_argument(
+        "--fit-all-for-serving",
+        action="store_true",
+        help="retrain the published serving artifact on all official songs after holdout evaluation",
+    )
     arguments = parser.parse_args(argv)
 
     report = train_text_baseline(
@@ -307,6 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=arguments.seed,
         test_ratio=arguments.test_ratio,
         augment_workbook=arguments.augment_workbook,
+        fit_all_for_serving=arguments.fit_all_for_serving,
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0

@@ -78,15 +78,16 @@ py -3.12 -m competition_emotion.calibration `
   --output 'F:\\netease\\_music\\competition\\runs\\official-20260910\\calibration-20260911.json'
 ```
 
-The current candidate bundle was trained with the 54 IDs unique to the older
-`emotion_songs_20260908_with_lrc.xlsx` snapshot. The trainer excludes all IDs
-that already exist in the official workbook, records both source hashes in the
-report, and can reproduce it with:
+The accepted v6 bundle selects the model on the fixed holdout without the
+54-row older snapshot augmentation, then retrains the published serving model
+on all official songs. The reproducible command is:
 
 ```powershell
-.\competition_service\scripts\train_official.ps1 `
-  -AugmentWorkbook 'F:\netease\_music\competition\data\emotion_songs_20260908_with_lrc.xlsx'
+.\competition_service\scripts\train_official.ps1 -FitAllForServing
 ```
+
+An older augmentation workbook may still be supplied for a research candidate
+with `-AugmentWorkbook`; it is never mixed into the accepted v6 run by default.
 
 Use `read_traces` and `mine_hard_cases` to build a review queue, then evaluate a
 proposed Rubric patch with `evaluate_patch_gate` on Dev and the immutable Test.

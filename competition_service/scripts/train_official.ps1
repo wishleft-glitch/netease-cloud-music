@@ -2,7 +2,8 @@
 param(
     [string]$Workbook = "F:\netease\_music\competition\data\emotion_songs_20260910.xlsx",
     [string]$BundleRoot = "F:\netease\_music\competition\runs\official-20260910",
-    [string]$AugmentWorkbook = ""
+    [string]$AugmentWorkbook = "",
+    [switch]$FitAllForServing
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,9 @@ try {
     $trainArgs = @("-3.12", "-m", "competition_emotion.train", "--workbook", $Workbook, "--bundle-dir", $BundleRoot)
     if ($AugmentWorkbook) {
         $trainArgs += @("--augment-workbook", $AugmentWorkbook)
+    }
+    if ($FitAllForServing) {
+        $trainArgs += "--fit-all-for-serving"
     }
     & py @trainArgs
     if ($LASTEXITCODE -ne 0) {
