@@ -13,9 +13,11 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
+from sklearn.svm import LinearSVC
 
 from competition_emotion.models import (
     TextScorer,
+    compose_model_text,
     load_text_scorer,
     save_text_scorer,
 )
@@ -56,6 +58,30 @@ class TextScorerTests(unittest.TestCase):
         scores = self.scorer.score("一个人孤独没有你")
 
         self.assertGreater(scores["孤独"], scores["狂欢"])
+
+    def test_fit_uses_metadata_aware_svc_configuration(self) -> None:
+        self.assertEqual(self.scorer.score_mode, "softmax")
+        self.assertEqual(self.scorer.vectorizer.ngram_range, (1, 5))
+        self.assertEqual(self.scorer.vectorizer.max_features, 150000)
+        self.assertIsInstance(self.scorer.classifier.estimators_[0], LinearSVC)
+        self.assertEqual(self.scorer.classifier.estimators_[0].C, 0.3)
+
+    def test_model_text_repeats_metadata_and_strips_loader_prefix(self) -> None:
+        loaded = song("1", {"狂欢"}, "夏日狂欢", "派对跳舞")
+        loaded = Song(
+            loaded.song_id,
+            loaded.labels,
+            loaded.name,
+            "歌手",
+            "流行",
+            "夏日狂欢 歌手 真正歌词",
+            loaded.audio_url,
+        )
+        model_text = compose_model_text(loaded)
+        self.assertEqual(model_text.count("夏日狂欢"), 5)
+        self.assertEqual(model_text.count("歌手"), 5)
+        self.assertEqual(model_text.count("流行"), 5)
+        self.assertTrue(model_text.endswith("真正歌词"))
 
     def test_score_preserves_label_order_and_probability_bounds(self) -> None:
         scores = self.scorer.score("friends dance together")

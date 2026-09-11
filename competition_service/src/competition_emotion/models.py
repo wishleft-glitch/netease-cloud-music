@@ -11,6 +11,7 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
+from sklearn.svm import LinearSVC
 from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
@@ -20,6 +21,8 @@ from .audio import FEATURE_NAMES, feature_vector
 
 _SCHEMA_VERSION = 2
 _EMPTY_TEXT_SENTINEL = "[no_text]"
+_MODEL_METADATA_REPEATS = 5
+_SCORE_MODES = frozenset({"probability", "softmax"})
 
 
 def _validate_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
@@ -40,8 +43,36 @@ def _text_or_sentinel(value: object) -> str:
 
 
 def _song_text(song: Song) -> str:
-    text = _text_or_sentinel(song.text)
-    return text if text != _EMPTY_TEXT_SENTINEL else _text_or_sentinel(song.name)
+    """Compose the model input with metadata repeated for a strong prior.
+
+    The official workbook stores title and artist at the front of ``text``.
+    Strip that duplicated prefix before adding the metadata block so a song
+    does not get an accidental tenfold title weight.
+    """
+    raw_text = _text_or_sentinel(song.text)
+    if raw_text == _EMPTY_TEXT_SENTINEL:
+        lyric = ""
+    else:
+        prefix = " ".join(
+            part.strip() for part in (song.name, song.artists) if str(part).strip()
+        )
+        lyric = raw_text
+        if prefix and raw_text.startswith(prefix):
+            lyric = raw_text[len(prefix) :].strip()
+    metadata = " ".join(
+        part.strip()
+        for part in (song.name, song.artists, song.genre)
+        if str(part).strip()
+    )
+    composed = " ".join(
+        part for part in (" ".join([metadata] * _MODEL_METADATA_REPEATS), lyric) if part
+    ).strip()
+    return composed or _text_or_sentinel(song.name)
+
+
+def compose_model_text(song: Song) -> str:
+    """Return the exact text representation used by training and inference."""
+    return _song_text(song)
 
 
 def _label_order_sha256(labels: tuple[str, ...]) -> str:
@@ -56,6 +87,7 @@ class TextScorer:
     labels: tuple[str, ...] = ()
     vectorizer: TfidfVectorizer | None = None
     classifier: OneVsRestClassifier | None = None
+    score_mode: str = "probability"
 
     def fit(self, songs: list[Song], labels: tuple[str, ...]) -> TextScorer:
         configured_labels = _validate_labels(labels)
@@ -90,24 +122,21 @@ class TextScorer:
 
         vectorizer = TfidfVectorizer(
             analyzer="char_wb",
-            ngram_range=(2, 5),
+            ngram_range=(1, 5),
             min_df=1,
-            max_features=80000,
+            max_features=150000,
             sublinear_tf=True,
         )
         features = vectorizer.fit_transform([_song_text(song) for song in songs])
         classifier = OneVsRestClassifier(
-            LogisticRegression(
-                max_iter=1000,
-                class_weight="balanced",
-                solver="liblinear",
-            )
+            LinearSVC(C=0.3, class_weight="balanced")
         )
         classifier.fit(features, targets)
 
         self.labels = configured_labels
         self.vectorizer = vectorizer
         self.classifier = classifier
+        self.score_mode = "softmax"
         return self
 
     def score(self, text: str) -> dict[str, float]:
@@ -122,7 +151,7 @@ class TextScorer:
         if not texts:
             return np.empty((0, len(self.labels)), dtype=float)
         features = vectorizer.transform([_text_or_sentinel(text) for text in texts])
-        return self._classifier_probabilities(classifier, features, len(texts))
+        return self._classifier_scores(classifier, features, len(texts))
 
     def _fitted_components(self) -> tuple[TfidfVectorizer, OneVsRestClassifier]:
         _validate_labels(self.labels)
@@ -134,18 +163,32 @@ class TextScorer:
             if len(self.classifier.estimators_) != len(self.labels):
                 raise ValueError("classifier estimators do not match configured labels")
             probe = self.vectorizer.transform([_EMPTY_TEXT_SENTINEL])
-            self._classifier_probabilities(self.classifier, probe, 1)
+            if self.score_mode not in _SCORE_MODES:
+                raise ValueError("unsupported score mode")
+            self._classifier_scores(self.classifier, probe, 1)
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError("TextScorer has not been fitted") from error
         return self.vectorizer, self.classifier
 
-    def _classifier_probabilities(
+    def _classifier_scores(
         self,
         classifier: OneVsRestClassifier,
         features: Any,
         rows: int,
     ) -> np.ndarray:
-        probabilities = np.asarray(classifier.predict_proba(features), dtype=float)
+        if self.score_mode == "softmax":
+            margins = np.asarray(classifier.decision_function(features), dtype=float)
+            if margins.ndim == 1:
+                margins = margins.reshape(-1, 1)
+            if margins.shape != (rows, len(self.labels)):
+                raise ValueError("classifier scores do not match configured labels")
+            if not np.isfinite(margins).all():
+                raise ValueError("classifier returned invalid scores")
+            shifted = margins - np.max(margins, axis=1, keepdims=True)
+            probabilities = np.exp(np.clip(shifted, -80.0, 0.0))
+            probabilities /= probabilities.sum(axis=1, keepdims=True)
+        else:
+            probabilities = np.asarray(classifier.predict_proba(features), dtype=float)
         if len(self.labels) == 1:
             classes = np.asarray(getattr(classifier, "classes_", ()))
             positive_indices = np.flatnonzero(classes == 1)
@@ -273,6 +316,7 @@ def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
             "label_order_sha256": _label_order_sha256(trained_labels),
             "vectorizer": vectorizer,
             "classifier": classifier,
+            "score_mode": scorer.score_mode,
         },
         Path(path),
     )
@@ -331,7 +375,15 @@ def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextSc
     classifier = record["classifier"]
     if not isinstance(vectorizer, TfidfVectorizer) or not isinstance(classifier, OneVsRestClassifier):
         raise ValueError("text scorer payload has invalid components")
-    scorer = TextScorer(labels=labels, vectorizer=vectorizer, classifier=classifier)
+    score_mode = record.get("score_mode", "probability")
+    if not isinstance(score_mode, str) or score_mode not in _SCORE_MODES:
+        raise ValueError("text scorer payload has invalid score mode")
+    scorer = TextScorer(
+        labels=labels,
+        vectorizer=vectorizer,
+        classifier=classifier,
+        score_mode=score_mode,
+    )
     try:
         scorer._fitted_components()
     except (AttributeError, TypeError, ValueError) as error:

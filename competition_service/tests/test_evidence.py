@@ -18,6 +18,12 @@ class EvidenceTests(unittest.TestCase):
             "仅基于歌曲名称进行情绪判定。",
         )
 
+    def test_reports_metadata_when_the_metadata_aware_model_is_used(self) -> None:
+        self.assertEqual(
+            build_evidence(lyric_used=True, title_used=False, metadata_used=True),
+            "基于歌曲名称、艺人、专辑/风格元数据与可用歌词进行情绪判定。",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

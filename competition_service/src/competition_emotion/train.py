@@ -16,12 +16,14 @@ import numpy as np
 from .constants import LABELS, MODEL_VERSION
 from .data import load_official_songs, workbook_snapshot
 from .evaluate import metric_report
-from .models import TextScorer, save_text_scorer
+from .models import TextScorer, compose_model_text, save_text_scorer
 from .splits import make_holdout
 from .types import Song
 
 
 REPORT_SCHEMA_VERSION = 2
+# Keep the wire-level model type stable while improving the implementation
+# behind the existing service contract.
 MODEL_TYPE = "lyrics_tfidf_logreg"
 BUNDLE_POINTER_SCHEMA_VERSION = 1
 
@@ -75,7 +77,7 @@ def _targets(songs: Sequence[Song], labels: tuple[str, ...]) -> np.ndarray:
 
 
 def _text_for_score(song: Song) -> str:
-    return song.text.strip() or song.name.strip() or "[no_text]"
+    return compose_model_text(song)
 
 
 def _label_support(songs: Sequence[Song], labels: tuple[str, ...]) -> dict[str, int]:
@@ -103,6 +105,27 @@ def _prediction_records(
             }
         )
     return records
+
+
+def _top_k_metrics(
+    targets: np.ndarray, scores: np.ndarray, *, k: int
+) -> dict[str, float]:
+    """Measure candidate coverage for the semantic second stage."""
+    if k < 1:
+        raise ValueError("k must be positive")
+    top_indices = np.argsort(-scores, axis=1, kind="stable")[:, :k]
+    row_indices = np.arange(len(targets))
+    any_positive = np.asarray(
+        [bool(targets[row, top_indices[row]].any()) for row in row_indices], dtype=bool
+    )
+    singleton_mask = targets.sum(axis=1) == 1
+    singleton_hits = any_positive[singleton_mask]
+    return {
+        f"any_positive_top{k}_hit_rate": float(any_positive.mean()) if len(any_positive) else 0.0,
+        f"strict_singleton_top{k}_hit_rate": (
+            float(singleton_hits.mean()) if len(singleton_hits) else None
+        ),
+    }
 
 
 def _publish_bundle(
@@ -187,6 +210,12 @@ def train_text_baseline(
     scorer = TextScorer().fit(train_songs, configured_labels)
     scores = scorer.score_many([_text_for_score(song) for song in test_songs])
     evaluation = metric_report(_targets(test_songs, configured_labels), scores, configured_labels)
+    evaluation.update(
+        _top_k_metrics(_targets(test_songs, configured_labels), scores, k=2)
+    )
+    evaluation.update(
+        _top_k_metrics(_targets(test_songs, configured_labels), scores, k=3)
+    )
     predictions = _prediction_records(test_songs, scores, configured_labels)
 
     report: dict[str, Any] = {

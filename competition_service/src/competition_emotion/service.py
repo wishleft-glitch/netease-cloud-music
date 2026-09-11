@@ -27,11 +27,12 @@ import uvicorn
 import httpx
 import numpy as np
 
-from .models import TextScorer, load_text_scorer
+from .models import TextScorer, compose_model_text, load_text_scorer
 from .constants import LABELS
 from .evidence import build_evidence
 from .lyrics import compose_lyrics
 from .request_audio import RequestAudioConfig, RequestAudioResult, acquire_request_audio
+from .semantic import SemanticReviewConfig, review_candidates
 from .train import BUNDLE_POINTER_SCHEMA_VERSION, MODEL_TYPE, REPORT_SCHEMA_VERSION
 from .types import Song
 
@@ -376,10 +377,17 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
     return _Runtime(scorer=scorer, model_type=MODEL_TYPE, model_version=model_version)
 
 
-def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _DEFAULT_SERVICE_AUDIO_CONFIG) -> FastAPI:
+def create_app(
+    bundle_root: Path,
+    *,
+    audio_config: ServiceAudioConfig | None = _DEFAULT_SERVICE_AUDIO_CONFIG,
+    semantic_config: SemanticReviewConfig | None = None,
+) -> FastAPI:
     """Create a ready FastAPI service from one fully validated model bundle."""
     if audio_config is not None and not isinstance(audio_config, ServiceAudioConfig):
         raise ValueError("audio_config must be a ServiceAudioConfig or None")
+    if semantic_config is not None and not isinstance(semantic_config, SemanticReviewConfig):
+        raise ValueError("semantic_config must be a SemanticReviewConfig or None")
     runtime = _load_runtime(Path(bundle_root))
     app = FastAPI(title="Competition Emotion Service", version=runtime.model_version)
     app.add_middleware(_RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
@@ -387,6 +395,7 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
     app.state.audio_capacity = (
         _AudioCapacityController(audio_config.max_concurrent_audio) if audio_config is not None else None
     )
+    app.state.semantic_config = semantic_config
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
@@ -435,7 +444,9 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
             text=lyric_text,
             audio_url=request.audio_url,
         )
-        scores = await asyncio.to_thread(runtime.scorer.score, song.text if lyric_used else song.name)
+        scores = await asyncio.to_thread(
+            runtime.scorer.score, compose_model_text(song)
+        )
         if not isinstance(scores, dict) or set(scores) != set(runtime.scorer.labels):
             raise RuntimeError("model returned invalid scores")
         ranked: list[tuple[str, float]] = []
@@ -450,6 +461,32 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
         if len(ranked) < 2:
             raise RuntimeError("model returned insufficient labels")
         ranked.sort(key=lambda item: item[1], reverse=True)
+        review_evidence: str | None = None
+        if semantic_config is not None and ranked[0][1] - ranked[1][1] < semantic_config.min_score_gap:
+            candidates = [label for label, _ in ranked[:3]]
+            try:
+                reviewed = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        review_candidates,
+                        song,
+                        lyric_text,
+                        candidates,
+                        semantic_config,
+                    ),
+                    timeout=float(semantic_config.timeout_seconds) + 0.25,
+                )
+            except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError, asyncio.TimeoutError):
+                reviewed = None
+            if reviewed is not None:
+                other = [item for item in ranked if item[0] != reviewed.label]
+                if other:
+                    other.sort(key=lambda item: item[1], reverse=True)
+                    selected_confidence = max(float(reviewed.confidence), other[0][1])
+                    ranked = [
+                        (reviewed.label, selected_confidence),
+                        (other[0][0], min(other[0][1], selected_confidence)),
+                    ]
+                    review_evidence = reviewed.evidence
         (top_emotion, top_confidence), (second_emotion, second_confidence) = ranked[:2]
         audio_result = RequestAudioResult("unavailable")
         if audio_config is not None:
@@ -478,7 +515,10 @@ def create_app(bundle_root: Path, *, audio_config: ServiceAudioConfig | None = _
             lyric_used=lyric_used,
             title_used=not lyric_used,
             audio_state=audio_result.state if audio_config is not None else None,
+            metadata_used=True,
         )
+        if review_evidence is not None:
+            evidence = f"{evidence} 语义复核选择候选“{top_emotion}”：{review_evidence}"[:500]
         return RecognizeResponse(
             code=200,
             data=RecognizeData(
@@ -505,6 +545,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--audio-temp-root", type=Path)
     parser.add_argument("--audio-budget-seconds", default=20.0, type=float)
     parser.add_argument("--max-concurrent-audio", default=4, type=int)
+    parser.add_argument("--semantic-reranker-url")
+    parser.add_argument("--semantic-reranker-timeout-seconds", type=float)
+    parser.add_argument("--semantic-reranker-min-gap", type=float)
     arguments = parser.parse_args(argv)
     try:
         host_address = ipaddress.ip_address(arguments.host)
@@ -527,6 +570,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except ValueError as error:
         parser.error(str(error))
+    semantic_url = arguments.semantic_reranker_url or os.environ.get(
+        "EMOTION_SEMANTIC_RERANKER_URL", ""
+    ).strip()
+    try:
+        semantic_timeout = (
+            arguments.semantic_reranker_timeout_seconds
+            if arguments.semantic_reranker_timeout_seconds is not None
+            else float(os.environ.get("SEMANTIC_RERANKER_TIMEOUT_SECONDS", "3"))
+        )
+        semantic_gap = (
+            arguments.semantic_reranker_min_gap
+            if arguments.semantic_reranker_min_gap is not None
+            else float(os.environ.get("SEMANTIC_RERANKER_MIN_GAP", "0.08"))
+        )
+    except ValueError:
+        parser.error("semantic reviewer environment values must be numeric")
+    semantic_config = None
+    if semantic_url:
+        try:
+            semantic_config = SemanticReviewConfig(
+                semantic_url,
+                timeout_seconds=semantic_timeout,
+                min_score_gap=semantic_gap,
+            )
+        except ValueError as error:
+            parser.error(str(error))
     uvicorn.run(
         create_app(
             arguments.bundle_root,
@@ -534,6 +603,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 request_config=request_audio_config,
                 max_concurrent_audio=arguments.max_concurrent_audio,
             ),
+            semantic_config=semantic_config,
         ),
         host=arguments.host,
         port=arguments.port,

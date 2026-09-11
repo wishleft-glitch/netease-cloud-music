@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from competition_emotion.models import load_text_scorer
-from competition_emotion.train import train_text_baseline
+from competition_emotion.train import _top_k_metrics, train_text_baseline
 
 
 LABELS = ("狂欢", "孤独")
@@ -21,6 +21,19 @@ REQUIRED_COLUMNS = (
 
 
 class TrainTextBaselineTests(unittest.TestCase):
+    def test_top_k_metrics_reports_candidate_coverage_for_multilabel_rows(self) -> None:
+        import numpy as np
+
+        y_true = np.asarray([[1, 0, 0], [0, 1, 1], [0, 0, 1]])
+        scores = np.asarray([[0.8, 0.1, 0.0], [0.7, 0.6, 0.5], [0.4, 0.3, 0.2]])
+        self.assertEqual(
+            _top_k_metrics(y_true, scores, k=2),
+            {
+                "any_positive_top2_hit_rate": 2 / 3,
+                "strict_singleton_top2_hit_rate": 0.5,
+            },
+        )
+
     def test_uses_one_snapshot_when_source_is_replaced_before_loading(self) -> None:
         original_rows = []
         for index in range(12):
