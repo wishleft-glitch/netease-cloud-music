@@ -10,7 +10,9 @@ param(
     [string[]]$AudioAllowedHost,
     [string]$AudioTempRoot,
     [double]$AudioBudgetSeconds = 20,
-    [int]$MaxConcurrentAudio = 4
+    [int]$MaxConcurrentAudio = 4,
+    [string]$RubricPath,
+    [string]$TracePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,11 +54,13 @@ function Get-CommandLineOptionValues {
 $startScript = Join-Path $PSScriptRoot "start_service.ps1"
 . $startScript -BundleRoot $BundleRoot -BindHost $BindHost -Port $Port -StateFile $StateFile `
     -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
-    -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+    -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio `
+    -RubricPath $RubricPath -TracePath $TracePath
 
 $configuration = Get-ServiceLaunchConfiguration -BundleRoot $BundleRoot -BindHost $BindHost -Port $Port `
     -StateFile $StateFile -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost `
-    -AudioTempRoot $AudioTempRoot -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+    -AudioTempRoot $AudioTempRoot -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio `
+    -RubricPath $RubricPath -TracePath $TracePath
 $resolvedBundleRoot = $configuration.resolved_bundle_root
 $canonicalBindHost = $configuration.canonical_bind_host
 $resolvedStateFile = $configuration.resolved_state_file
@@ -126,7 +130,8 @@ Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
 
 Start-CompetitionEmotionService -Configuration $configuration -StateReservation $stateReservation -ReplaceStaleState `
     -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
-    -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+    -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio `
+    -RubricPath $RubricPath -TracePath $TracePath
 }
 finally {
     if ($null -ne $stateReservation) {

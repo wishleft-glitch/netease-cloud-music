@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .evidence_validator import validate_evidence
+from .rubric import DEFAULT_RUBRIC_PATH, Rubric, load_rubric
 from .types import Song
 
 
@@ -21,6 +23,7 @@ class SemanticReviewConfig:
     timeout_seconds: float = 3.0
     min_score_gap: float = 0.10
     candidate_count: int = 7
+    require_verified_evidence: bool = True
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.url)
@@ -60,6 +63,8 @@ class SemanticReviewConfig:
             or not 2 <= self.candidate_count <= 15
         ):
             raise ValueError("semantic review candidate_count must be between 2 and 15")
+        if not isinstance(self.require_verified_evidence, bool):
+            raise ValueError("semantic review require_verified_evidence must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,8 @@ class SemanticReviewResult:
     label: str
     confidence: float
     evidence: str
+    quotes: tuple[str, ...] = ()
+    rule_ids: tuple[str, ...] = ()
 
 
 def review_candidates(
@@ -74,8 +81,10 @@ def review_candidates(
     lyric_text: str,
     candidates: Sequence[str],
     config: SemanticReviewConfig,
+    rubric: Rubric | None = None,
 ) -> SemanticReviewResult:
     """Ask the internal endpoint to choose only from the supplied candidates."""
+    rubric = rubric or load_rubric(DEFAULT_RUBRIC_PATH)
     candidate_list = tuple(dict.fromkeys(str(candidate).strip() for candidate in candidates))
     if not candidate_list:
         raise ValueError("semantic review requires candidates")
@@ -86,7 +95,8 @@ def review_candidates(
         "album_name": song.genre,
         "lyrics": lyric_text,
         "candidates": list(candidate_list),
-        "instruction": "选择一个最符合歌曲整体情绪的候选标签，只返回候选标签、置信度和证据。",
+        "rubric": rubric.context(candidate_list) if rubric is not None else [],
+        "instruction": "选择一个最符合歌曲整体情绪的候选标签，只返回候选标签、置信度、可核验歌词引文和Rubric规则ID。",
     }
     with httpx.Client(timeout=float(config.timeout_seconds), follow_redirects=False) as client:
         response = client.post(config.url, json=payload)
@@ -109,4 +119,26 @@ def review_candidates(
         or len(evidence) > 450
     ):
         raise ValueError("semantic review response is invalid")
-    return SemanticReviewResult(label, float(confidence), evidence.strip())
+    quotes = result.get("quotes", [])
+    rule_ids = result.get("rule_ids", [])
+    if not isinstance(quotes, list) or not isinstance(rule_ids, list):
+        raise ValueError("semantic review response is invalid")
+    try:
+        validated = validate_evidence(
+            lyric_text,
+            evidence,
+            quotes,
+            rule_ids,
+            rubric=rubric,
+            label=label,
+            require_quote=config.require_verified_evidence,
+        )
+    except ValueError as error:
+        raise ValueError("semantic review response is invalid") from error
+    return SemanticReviewResult(
+        label,
+        float(confidence),
+        validated.evidence,
+        validated.quotes,
+        validated.rule_ids,
+    )

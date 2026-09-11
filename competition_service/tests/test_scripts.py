@@ -538,6 +538,20 @@ exit 0'''
         self.assertIn('parser.add_argument("--max-concurrent-audio"', service)
         self.assertIn("max_concurrent_audio=arguments.max_concurrent_audio", service)
 
+    def test_launcher_can_pass_rubric_and_trace_paths(self) -> None:
+        launcher = read(SCRIPTS / "start_service.ps1")
+        restart = read(SCRIPTS / "restart_service.ps1")
+        service = read(SERVICE_ROOT / "src" / "competition_emotion" / "service.py")
+
+        self.assertIn('[string]$RubricPath', launcher)
+        self.assertIn('[string]$TracePath', launcher)
+        self.assertIn('"--rubric-path"', launcher)
+        self.assertIn('"--trace-path"', launcher)
+        self.assertIn('[string]$RubricPath', restart)
+        self.assertIn('[string]$TracePath', restart)
+        self.assertIn('parser.add_argument("--rubric-path"', service)
+        self.assertIn('parser.add_argument("--trace-path"', service)
+
     def test_runbook_covers_startup_monitoring_and_required_recoveries(self) -> None:
         source = read(DOCS / "official-protocol-runbook.md").lower()
 

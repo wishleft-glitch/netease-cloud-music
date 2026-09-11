@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "rubric_version": "emotion-rubric-v1",
+  "mode": "soft_context",
+  "description": "候选标签的可审计语义上下文；只用于解释和复核，不对候选集做硬极性过滤。",
+  "labels": ["狂欢", "热血励志", "活力", "欢快", "甜蜜", "自信", "浪漫", "放松", "治愈", "思念", "平静", "孤独", "悲伤", "苦情", "抑郁"],
+  "entries": [
+    {"label": "狂欢", "definition": "群体庆祝或强烈热烈的欢腾氛围。", "positive_cues": ["庆祝", "派对", "欢呼", "尽情释放"], "counterexamples": ["仅有轻松愉快但缺少强烈欢腾"], "rule_ids": ["joy.intensity", "joy.celebration"]},
+    {"label": "热血励志", "definition": "面向目标、奋斗或逆境坚持的高昂激励情绪。", "positive_cues": ["坚持", "挑战", "梦想", "逆境前进"], "counterexamples": ["只有热闹节奏而没有目标或奋斗语义"], "rule_ids": ["drive.goal", "drive.persistence"]},
+    {"label": "活力", "definition": "积极、动感、有行动冲劲的生命力。", "positive_cues": ["行动", "青春", "动感", "向前"], "counterexamples": ["舒缓安静或明显低落的整体表达"], "rule_ids": ["energy.motion", "energy.positive"]},
+    {"label": "欢快", "definition": "轻松明亮、愉悦而自然的快乐感受。", "positive_cues": ["开心", "轻松", "明亮", "俏皮"], "counterexamples": ["强烈悲痛或主要是奋斗宣言"], "rule_ids": ["joy.light", "joy.ease"]},
+    {"label": "甜蜜", "definition": "亲密关系中的温柔、宠爱和幸福感。", "positive_cues": ["恋人", "宠爱", "依偎", "幸福"], "counterexamples": ["单纯怀旧或失恋后的痛苦"], "rule_ids": ["love.tender", "love.happy"]},
+    {"label": "自信", "definition": "自我肯定、能力确信或不畏评价的情绪。", "positive_cues": ["相信自己", "独立", "无惧", "掌控"], "counterexamples": ["自我否定、无望或被动哀叹"], "rule_ids": ["self.assurance", "self.agency"]},
+    {"label": "浪漫", "definition": "富有想象、仪式感或审美氛围的爱意表达。", "positive_cues": ["夜色", "约会", "心动", "诗意"], "counterexamples": ["只陈述关系冲突或现实痛苦"], "rule_ids": ["love.atmosphere", "love.imagination"]},
+    {"label": "放松", "definition": "解除紧张、适合休息或舒缓压力的感觉。", "positive_cues": ["休息", "微风", "慢下来", "解压"], "counterexamples": ["节奏或语义持续紧张、激烈、悲痛"], "rule_ids": ["calm.release", "calm.rest"]},
+    {"label": "治愈", "definition": "带来安慰、修复、陪伴或情绪恢复的温暖感受。", "positive_cues": ["安慰", "陪伴", "会好起来", "拥抱"], "counterexamples": ["只表达伤痛而没有安抚或修复方向"], "rule_ids": ["care.comfort", "care.recovery"]},
+    {"label": "思念", "definition": "对不在身边的人、往事或故乡的想念牵挂。", "positive_cues": ["想你", "回忆", "远方", "故乡"], "counterexamples": ["当前关系甜蜜且没有离隔或追忆"], "rule_ids": ["longing.absence", "longing.memory"]},
+    {"label": "平静", "definition": "稳定、克制、从容而少有情绪波动的状态。", "positive_cues": ["安静", "从容", "清澈", "接受"], "counterexamples": ["明显兴奋、冲突或持续绝望"], "rule_ids": ["calm.steady", "calm.acceptance"]},
+    {"label": "孤独", "definition": "缺少连接、独处或与他人隔离的主观感受。", "positive_cues": ["一个人", "无人理解", "隔离", "夜晚独处"], "counterexamples": ["主动享受独处且整体没有缺失感"], "rule_ids": ["isolation.alone", "isolation.disconnection"]},
+    {"label": "悲伤", "definition": "由失去、离别或受伤引起的直接哀痛和低落。", "positive_cues": ["哭泣", "失去", "离别", "心痛"], "counterexamples": ["长期无望、麻木或主要是怨恨叙事"], "rule_ids": ["sadness.loss", "sadness.pain"]},
+    {"label": "苦情", "definition": "围绕命运艰难、关系受苦或反复受挫的哀怨叙事。", "positive_cues": ["辛苦", "委屈", "命运", "受尽折磨"], "counterexamples": ["短暂失落但没有持续苦难叙事"], "rule_ids": ["hardship.suffering", "hardship.grievance"]},
+    {"label": "抑郁", "definition": "持续低落、无望、麻木或难以摆脱的沉重情绪。", "positive_cues": ["无望", "麻木", "空虚", "无法走出"], "counterexamples": ["单次悲伤但存在明确恢复、安慰或希望"], "rule_ids": ["depression.hopeless", "depression.numbness"]}
+  ]
+}

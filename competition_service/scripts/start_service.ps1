@@ -11,7 +11,9 @@ param(
     [string[]]$AudioAllowedHost,
     [string]$AudioTempRoot,
     [double]$AudioBudgetSeconds = 20,
-    [int]$MaxConcurrentAudio = 4
+    [int]$MaxConcurrentAudio = 4,
+    [string]$RubricPath,
+    [string]$TracePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -328,7 +330,9 @@ function Get-ServiceLaunchConfiguration {
         [string[]]$AudioAllowedHost,
         [string]$AudioTempRoot,
         [double]$AudioBudgetSeconds,
-        [int]$MaxConcurrentAudio
+        [int]$MaxConcurrentAudio,
+        [string]$RubricPath,
+        [string]$TracePath
     )
 
     if (-not ($Port -is [int]) -or $Port -lt 1 -or $Port -gt 65535) {
@@ -365,6 +369,8 @@ function Get-ServiceLaunchConfiguration {
         resolved_state_file = $resolvedStateFile
         state_directory = $stateDirectory
         port = $Port
+        rubric_path = $RubricPath
+        trace_path = $TracePath
     }
 }
 
@@ -377,7 +383,9 @@ function Start-CompetitionEmotionService {
         [string[]]$AudioAllowedHost,
         [string]$AudioTempRoot,
         [double]$AudioBudgetSeconds,
-        [int]$MaxConcurrentAudio
+        [int]$MaxConcurrentAudio,
+        [string]$RubricPath,
+        [string]$TracePath
     )
 
     $allowedCallerPaths = @(
@@ -410,6 +418,8 @@ function Start-CompetitionEmotionService {
         $canonicalBindHost = $Configuration.canonical_bind_host
         $stateDirectory = $Configuration.state_directory
         $Port = [int]$Configuration.port
+        $RubricPath = $Configuration.rubric_path
+        $TracePath = $Configuration.trace_path
         $existingStateSnapshot = Get-StateSnapshot -Path $resolvedStateFile
         $existingStateStatus = Get-ExistingStateStatus -Snapshot $existingStateSnapshot
         if ($existingStateStatus -eq "LiveOwned") {
@@ -453,6 +463,12 @@ function Start-CompetitionEmotionService {
         }
         if (-not [string]::IsNullOrWhiteSpace($AudioTempRoot)) {
             $arguments += "--audio-temp-root", ([System.IO.Path]::GetFullPath($AudioTempRoot))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RubricPath)) {
+            $arguments += "--rubric-path", ([System.IO.Path]::GetFullPath($RubricPath))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($TracePath)) {
+            $arguments += "--trace-path", ([System.IO.Path]::GetFullPath($TracePath))
         }
         $argumentLine = (@($arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument -Value ([string]$_) }) -join " ")
 
@@ -538,12 +554,14 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         $configuration = Get-ServiceLaunchConfiguration -BundleRoot $BundleRoot -BindHost $BindHost -Port $Port `
             -StateFile $StateFile -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost `
-            -AudioTempRoot $AudioTempRoot -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+            -AudioTempRoot $AudioTempRoot -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio `
+            -RubricPath $RubricPath -TracePath $TracePath
         $stateReservation = Acquire-StateReservation -StatePath $configuration.resolved_state_file
         Start-CompetitionEmotionService -Configuration $configuration -StateReservation $stateReservation `
             -ReplaceStaleState:$ReplaceStaleState `
             -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
-            -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+            -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio `
+            -RubricPath $RubricPath -TracePath $TracePath
     }
     finally {
         if ($null -ne $stateReservation) {

@@ -16,6 +16,7 @@ from threading import BoundedSemaphore
 from time import monotonic, perf_counter
 from typing import Any, Sequence
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -30,7 +31,9 @@ import numpy as np
 from .models import TextScorer, load_text_scorer
 from .constants import LABELS
 from .evidence import build_evidence
+from .iteration import TraceRecord, append_trace
 from .lyrics import compose_lyrics
+from .rubric import DEFAULT_RUBRIC_PATH, load_rubric
 from .request_audio import RequestAudioConfig, RequestAudioResult, acquire_request_audio
 from .semantic import SemanticReviewConfig, review_candidates
 from .train import BUNDLE_POINTER_SCHEMA_VERSION, MODEL_TYPE, REPORT_SCHEMA_VERSION
@@ -43,6 +46,14 @@ MAX_REQUEST_BODY_BYTES = 110_000
 MAX_INTERNAL_REQUEST_SECONDS = 25.0
 _REQUEST_STARTED_AT_SCOPE_KEY = "competition_emotion.request_started_at"
 _REQUEST_MONOTONIC_STARTED_AT_SCOPE_KEY = "competition_emotion.request_monotonic_started_at"
+
+
+def _append_trace_safely(path: Path, record: TraceRecord) -> None:
+    """Tracing is best effort and must never turn a successful prediction into a 500."""
+    try:
+        append_trace(path, record)
+    except (OSError, ValueError):
+        return
 
 
 class RecognizeRequest(BaseModel):
@@ -390,12 +401,21 @@ def create_app(
     *,
     audio_config: ServiceAudioConfig | None = _DEFAULT_SERVICE_AUDIO_CONFIG,
     semantic_config: SemanticReviewConfig | None = None,
+    rubric_path: Path | None = None,
+    trace_path: Path | None = None,
 ) -> FastAPI:
     """Create a ready FastAPI service from one fully validated model bundle."""
     if audio_config is not None and not isinstance(audio_config, ServiceAudioConfig):
         raise ValueError("audio_config must be a ServiceAudioConfig or None")
     if semantic_config is not None and not isinstance(semantic_config, SemanticReviewConfig):
         raise ValueError("semantic_config must be a SemanticReviewConfig or None")
+    if rubric_path is not None and not isinstance(rubric_path, Path):
+        raise ValueError("rubric_path must be a Path or None")
+    if trace_path is not None and not isinstance(trace_path, Path):
+        raise ValueError("trace_path must be a Path or None")
+    rubric = load_rubric(rubric_path or DEFAULT_RUBRIC_PATH)
+    if trace_path is not None and trace_path.exists() and not trace_path.is_file():
+        raise ValueError("trace_path must be a regular file path")
     runtime = _load_runtime(Path(bundle_root))
     app = FastAPI(title="Competition Emotion Service", version=runtime.model_version)
     app.add_middleware(_RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
@@ -404,6 +424,8 @@ def create_app(
         _AudioCapacityController(audio_config.max_concurrent_audio) if audio_config is not None else None
     )
     app.state.semantic_config = semantic_config
+    app.state.rubric = rubric
+    app.state.trace_path = trace_path
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, __: RequestValidationError) -> JSONResponse:
@@ -469,9 +491,12 @@ def create_app(
         if len(ranked) < 2:
             raise RuntimeError("model returned insufficient labels")
         ranked.sort(key=lambda item: item[1], reverse=True)
+        candidate_labels: tuple[str, ...] = tuple(label for label, _ in ranked[:2])
+        reviewed = None
         review_evidence: str | None = None
         if semantic_config is not None and ranked[0][1] - ranked[1][1] < semantic_config.min_score_gap:
             candidates = [label for label, _ in ranked[: semantic_config.candidate_count]]
+            candidate_labels = tuple(candidates)
             try:
                 reviewed = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -480,6 +505,7 @@ def create_app(
                         lyric_text,
                         candidates,
                         semantic_config,
+                        rubric,
                     ),
                     timeout=float(semantic_config.timeout_seconds) + 0.25,
                 )
@@ -494,7 +520,7 @@ def create_app(
                         (reviewed.label, selected_confidence),
                         (other[0][0], min(other[0][1], selected_confidence)),
                     ]
-                    review_evidence = reviewed.evidence
+                review_evidence = reviewed.evidence
         (top_emotion, top_confidence), (second_emotion, second_confidence) = ranked[:2]
         audio_result = RequestAudioResult("unavailable")
         if audio_config is not None:
@@ -536,7 +562,34 @@ def create_app(
             metadata_fields=metadata_fields,
         )
         if review_evidence is not None:
-            evidence = f"{evidence} 语义复核选择候选“{top_emotion}”：{review_evidence}"[:500]
+            review_parts = [review_evidence]
+            if reviewed is not None and reviewed.quotes:
+                review_parts.append("歌词引文：“" + "；".join(reviewed.quotes) + "”")
+            if reviewed is not None and reviewed.rule_ids:
+                review_parts.append("Rubric规则：" + "、".join(reviewed.rule_ids))
+            evidence = f"{evidence} 语义复核选择候选“{top_emotion}”：" + " ".join(review_parts)
+            evidence = evidence[:500]
+        if trace_path is not None:
+            trace_record = TraceRecord(
+                trace_id=uuid4().hex,
+                song_id=request.song_id,
+                model_version=runtime.model_version,
+                rubric_version=rubric.version,
+                top_label=top_emotion,
+                top_confidence=float(top_confidence),
+                second_label=second_emotion,
+                second_confidence=float(second_confidence),
+                candidates=candidate_labels,
+                evidence=evidence,
+                reviewer_used=reviewed is not None,
+                reviewer_label=reviewed.label if reviewed is not None else None,
+                reviewer_confidence=reviewed.confidence if reviewed is not None else None,
+                reviewer_evidence=reviewed.evidence if reviewed is not None else "",
+                reviewer_quotes=reviewed.quotes if reviewed is not None else (),
+                reviewer_rule_ids=reviewed.rule_ids if reviewed is not None else (),
+                latency_ms=max(0, int((perf_counter() - started_at) * 1000)),
+            )
+            asyncio.create_task(asyncio.to_thread(_append_trace_safely, trace_path, trace_record))
         return RecognizeResponse(
             code=200,
             data=RecognizeData(
@@ -567,6 +620,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--semantic-reranker-timeout-seconds", type=float)
     parser.add_argument("--semantic-reranker-min-gap", type=float)
     parser.add_argument("--semantic-reranker-candidate-count", type=int)
+    parser.add_argument("--rubric-path", type=Path)
+    parser.add_argument("--trace-path", type=Path)
     arguments = parser.parse_args(argv)
     try:
         host_address = ipaddress.ip_address(arguments.host)
@@ -621,6 +676,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except ValueError as error:
             parser.error(str(error))
+    rubric_path = arguments.rubric_path
+    if rubric_path is None:
+        configured_rubric_path = os.environ.get("EMOTION_RUBRIC_PATH", "").strip()
+        rubric_path = Path(configured_rubric_path) if configured_rubric_path else None
+    trace_path = arguments.trace_path
+    if trace_path is None:
+        configured_trace_path = os.environ.get("EMOTION_TRACE_PATH", "").strip()
+        trace_path = Path(configured_trace_path) if configured_trace_path else None
     uvicorn.run(
         create_app(
             arguments.bundle_root,
@@ -629,6 +692,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_concurrent_audio=arguments.max_concurrent_audio,
             ),
             semantic_config=semantic_config,
+            rubric_path=rubric_path,
+            trace_path=trace_path,
         ),
         host=arguments.host,
         port=arguments.port,

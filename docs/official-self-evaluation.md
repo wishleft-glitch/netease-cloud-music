@@ -61,3 +61,24 @@ The model change is an offline improvement only. The macro-recall hard gate is
 gate. The next production stage is a candidate-limited semantic review for
 low-margin cases; its endpoint and measured results must be supplied before
 claiming a gate pass.
+
+## Rubric, evidence, and calibration controls
+
+The repository now includes a versioned 15-label Rubric at
+`competition_service/rubric/emotion_rubric.json`. The semantic review payload
+contains only the local candidate labels and their Rubric context. The Rubric is
+soft context: it does not hard-exclude reasonable same-polarity labels, which
+matches the competition rule that the final output is one most-confident
+second-level label.
+
+Reviewer evidence is accepted only when every returned lyric quote is found in
+the request lyrics and every returned rule ID exists in the active Rubric. An
+invalid or unavailable reviewer result falls back to the local model.
+
+`python -m competition_emotion.calibration` creates a deterministic Dev slice
+inside Official Train (`20260911`, 15% by default). The fixed Official Test
+split remains unchanged and is never used for threshold tuning. Optional
+`EMOTION_TRACE_PATH` writes append-only traces with model/Rubric versions,
+candidate margin, reviewer outcome, and verified evidence. `mine_hard_cases`
+and `evaluate_patch_gate` provide the review queue and regression gate for a
+proposed Rubric patch; publishing is an explicit human-reviewed step.

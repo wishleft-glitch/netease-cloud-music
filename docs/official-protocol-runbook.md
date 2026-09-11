@@ -4,7 +4,7 @@
 
 `client -> nonloopback listener -> FastAPI request validation -> metadata-aware local model -> optional candidate-limited semantic review -> optional audio acquisition -> response`.
 
-The service loads the immutable bundle selected by `BundleRoot\\current.json` at startup. The local model ranks all 15 labels and returns one label plus a second candidate. When an optional semantic review URL is configured and the local margin is below the configured threshold, the reviewer may choose only from the local Top-7 candidates. An invalid, slow, or unavailable reviewer result falls back to the local ranking. The two models in the complete chain are the local classifier and the optional semantic reviewer; audio measurement is a bounded evidence path and does not change ranked labels. The formal held-out limitations are recorded in [`official-self-evaluation.md`](official-self-evaluation.md); no hidden-set accuracy claim follows from that evaluation.
+The service loads the immutable bundle selected by `BundleRoot\\current.json` at startup. The local model ranks all 15 labels and returns one label plus a second candidate. When an optional semantic review URL is configured and the local margin is below the configured threshold, the reviewer may choose only from the local Top-7 candidates. The reviewer also receives the versioned soft Rubric context and must return a lyric quote that occurs in the supplied lyrics plus any Rubric rule IDs it used. An invalid, slow, or unavailable reviewer result falls back to the local ranking. The two models in the complete chain are the local classifier and the optional semantic reviewer; audio measurement is a bounded evidence path and does not change ranked labels. The formal held-out limitations are recorded in [`official-self-evaluation.md`](official-self-evaluation.md); no hidden-set accuracy claim follows from that evaluation.
 
 Direct audio mode resolves and accepts only security-pinned public addresses. Proxy mode requires both a proxy origin and an exact allowlist of permitted DNS hosts. Do not use a proxy without the exact allowlist.
 
@@ -29,6 +29,7 @@ Start a service on a private interface. Substitute the actual bundle path, IP, a
   -AudioTempRoot 'D:\\competition\\audio-tmp' `
   -AudioBudgetSeconds 20 `
   -MaxConcurrentAudio 4
+  # Optional: -RubricPath 'D:\\competition\\emotion_rubric.json' -TracePath 'D:\\competition\\traces\\emotion.jsonl'
 ```
 
 The launcher canonicalizes the supplied IP literal before passing it to Python and storing it in state (for example, `0` becomes `0.0.0.0`). It starts a hidden child process, creates `logs\\service` under the bundle root, and atomically writes `service-state.json` only after the PID and its machine-parseable process creation time are present. The state file contains only PID, canonical bind host, port, start time, and bundle root. It never stores the proxy URL or request URLs. An OS-level exclusive reservation for the state path is held from state inspection through publication, so concurrent launchers cannot replace one another's state. A live owned state file blocks a second start. A stale or invalid state requires an operator review and an explicit `-ReplaceStaleState` on the next start; the launcher revalidates the exact stale file, atomically renames it to a unique same-directory `.stale` backup before launch, removes that backup only after successful publication, and restores it on pre-publication failure when the state path remains absent and the backup is unchanged. If a newer state appears, or backup ownership cannot be verified, the launcher leaves the state path and backup untouched for manual recovery.
@@ -55,10 +56,35 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `AudioTempRoot` | Disposable audio workspace | Use a writable local volume with a cleanup policy. |
 | `AudioBudgetSeconds` | Per-request audio budget | Greater than 0 and no more than 25; default 20. |
 | `MaxConcurrentAudio` | Non-queuing audio capacity | Positive integer; tune using saturation data. |
+| `RubricPath` / `EMOTION_RUBRIC_PATH` | Versioned candidate definitions and evidence rules | Defaults to the repository Rubric; custom files must cover exactly the 15 official labels. |
+| `TracePath` / `EMOTION_TRACE_PATH` | Append-only prediction trace for hard-case mining | Optional; keep outside the bundle and restrict access to operators. |
 | `EMOTION_SEMANTIC_RERANKER_URL` | Optional internal candidate reviewer | Set only to an approved internal HTTP(S) endpoint (`.internal`, `.local`, `.corp`, or private IP); leave empty to disable. |
 | `--semantic-reranker-timeout-seconds` | Reviewer timeout | 0.1–10 seconds; keep below the overall 25-second request budget. |
 | `--semantic-reranker-min-gap` | Local score gap below which review runs | Default 0.10; calibrate on a separate validation set. |
 | `--semantic-reranker-candidate-count` | Number of local candidates supplied to the reviewer | Default 7; valid range 2–15; larger pools improve coverage but increase review ambiguity and prompt size. |
+
+The Dev/calibration manifest is created offline from the fixed Train portion:
+
+```powershell
+py -3.12 -m competition_emotion.calibration `
+  --workbook 'F:\\netease\\_music\\competition\\data\\emotion_songs_20260910.xlsx' `
+  --output 'F:\\netease\\_music\\competition\\runs\\official-20260910\\calibration-20260911.json'
+```
+
+Use `read_traces` and `mine_hard_cases` to build a review queue, then evaluate a
+proposed Rubric patch with `evaluate_patch_gate` on Dev and the immutable Test.
+The patch generator marks proposals as `proposed` and requires human review;
+there is no online rule mutation.
+
+After the Dev/Test gate passes and a reviewer approves the change,
+`publish_rubric_candidate` atomically replaces the operator-selected Rubric
+file. A failed gate or missing approval cannot publish.
+
+```powershell
+py -3.12 -m competition_emotion.iteration `
+  --trace-path 'F:\\netease\\_music\\competition\\runs\\official-20260910\\traces\\emotion.jsonl' `
+  --output 'F:\\netease\\_music\\competition\\runs\\official-20260910\\rubric-patch-proposal.json'
+```
 
 Restart with the same explicit nonsecret settings. The restart script canonicalizes its IP literal before comparison, then refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, canonical host, and port argument, and its Windows process creation time matches the recorded start time. It holds the same OS-level state reservation used by start from the state check through process stop, state removal, and publication of the replacement state, so a concurrent stale-state start waits for the completed restart.
 

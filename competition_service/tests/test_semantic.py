@@ -7,6 +7,7 @@ from competition_emotion.semantic import (
     SemanticReviewConfig,
     review_candidates,
 )
+from competition_emotion.rubric import DEFAULT_RUBRIC_PATH, load_rubric
 from competition_emotion.types import Song
 
 
@@ -35,6 +36,7 @@ class SemanticReviewTests(unittest.TestCase):
             "label": "孤独",
             "confidence": 0.91,
             "evidence": "歌词反复表达独处和隔离。",
+            "quotes": ["一个人走在夜里"],
         }
         response.raise_for_status.return_value = None
         client = MagicMock()
@@ -48,7 +50,26 @@ class SemanticReviewTests(unittest.TestCase):
         payload = client.post.call_args.kwargs["json"]
         self.assertEqual(payload["song_id"], "1")
         self.assertEqual(payload["candidates"], ["孤独", "思念"])
+        self.assertEqual([item["label"] for item in payload["rubric"]], ["孤独", "思念"])
+        self.assertTrue(payload["rubric"][0]["rule_ids"])
         self.assertNotIn("audio_url", payload)
+
+    def test_review_rejects_fabricated_lyric_quote(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "label": "孤独",
+            "confidence": 0.8,
+            "evidence": "看起来孤独。",
+            "quotes": ["这句歌词不在输入里"],
+        }
+        response.raise_for_status.return_value = None
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.__exit__.return_value = False
+        client.post.return_value = response
+        with patch("competition_emotion.semantic.httpx.Client", return_value=client):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                review_candidates(self.song, "一个人走在夜里", ["孤独", "思念"], self.config, load_rubric(DEFAULT_RUBRIC_PATH))
 
     def test_review_rejects_a_label_outside_candidates(self) -> None:
         response = MagicMock()

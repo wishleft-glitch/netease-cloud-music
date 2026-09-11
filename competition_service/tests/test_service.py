@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from threading import Event
 from time import perf_counter
 import unittest
+from time import sleep
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -20,6 +21,7 @@ from competition_emotion.constants import LABELS
 from competition_emotion.models import TextScorer, compose_model_text, save_text_scorer
 from competition_emotion.request_audio import RequestAudioResult
 from competition_emotion.semantic import SemanticReviewConfig, SemanticReviewResult
+from competition_emotion.iteration import read_traces
 from competition_emotion.service import MAX_REQUEST_BODY_BYTES, ServiceAudioConfig, create_app
 from competition_emotion.types import Song
 
@@ -381,6 +383,27 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("语义复核选择候选", data["evidence"])
         candidates = review.call_args.args[2]
         self.assertEqual(candidates, ["孤独", "思念", "悲伤"])
+        self.assertEqual(review.call_args.args[4].version, "emotion-rubric-v1")
+
+    def test_optional_trace_path_records_prediction_without_blocking_response(self) -> None:
+        trace_path = Path(self.directory.name) / "traces" / "emotion.jsonl"
+        app = create_app(
+            _write_bundle(Path(self.directory.name) / "trace-bundle"),
+            audio_config=None,
+            trace_path=trace_path,
+        )
+        client = TestClient(app)
+        with patch.object(app.state.runtime.scorer, "score", return_value=self._scores(孤独=0.7, 思念=0.3)):
+            response = client.post("/api/v1/emotion/recognize", json=self._request(text_lyric="任意歌词"))
+        self.assertEqual(response.status_code, 200)
+        for _ in range(50):
+            if trace_path.exists():
+                break
+            sleep(0.01)
+        records = read_traces(trace_path)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].song_id, "abc")
+        self.assertEqual(records[0].rubric_version, "emotion-rubric-v1")
 
     def test_required_only_request_reports_song_name_as_the_only_evidence(self) -> None:
         with patch.object(self.app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)) as score:

@@ -39,6 +39,47 @@
 6. 将低 margin、模型与复核器不一致的样本写入人工复核队列。人工结果进入
    新版本训练集，按固定测试集重新评测，通过后原子切换 bundle 指针。
 
+### EmoCompass 方法落地
+
+本服务已经把参赛方案中最有价值的四个环节做成了可运行组件：
+
+- `competition_service/rubric/emotion_rubric.json` 是版本化 Rubric。它覆盖全部
+  15 个正式标签，提供定义、正向线索、反例和唯一规则 ID；当前以
+  `soft_context` 传给语义复核器，只帮助候选消歧，不把同极性标签硬性排除。
+- 语义复核响应必须带有可核验的歌词引文。服务会检查引文确实出现在本次输入
+  歌词中，并检查返回的 Rubric 规则 ID；校验失败时安全回退本地模型。
+- `python -m competition_emotion.calibration` 从固定 Official Test 的 Train
+  内部再切出 Dev/校准集，默认种子为 `20260911`、比例为 15%。校准集只用于
+  阈值、路由和规则调参，不能改写固定 Test。
+- `iteration.py` 提供 JSONL trace、低 margin/复核分歧困难样本挖掘、Rubric
+  patch 提案和回归门禁。提案状态固定为 `proposed`，必须经过人工复核和门禁
+  才能进入下一版 Rubric，不会由线上请求自动改生产规则。
+
+启动服务时可设置 `EMOTION_RUBRIC_PATH` 和 `EMOTION_TRACE_PATH`，或分别传入
+`--rubric-path`、`--trace-path`。trace 不记录完整音频，只保存模型版本、Rubric
+版本、候选、分差、复核结果和已验证证据，适合按日离线挖掘。
+
+示例：
+
+```powershell
+py -3.12 -m competition_emotion.calibration `
+  --workbook F:\netease\_music\competition\data\emotion_songs_20260910.xlsx `
+  --output F:\netease\_music\competition\runs\official-20260910\calibration-20260911.json
+```
+
+离线迭代顺序是：读取 trace → `mine_hard_cases` → 生成 proposed patch → 在 Dev
+和固定 Test 上评测 → `evaluate_patch_gate` 通过后人工确认 → 发布新的不可变
+Rubric/model bundle。
+
+```powershell
+py -3.12 -m competition_emotion.iteration `
+  --trace-path F:\netease\_music\competition\runs\official-20260910\traces\emotion.jsonl `
+  --output F:\netease\_music\competition\runs\official-20260910\rubric-patch-proposal.json
+```
+
+通过 Dev/Test 门禁并完成人工复核后，调用 `publish_rubric_candidate` 原子替换
+目标 Rubric 文件；未显式批准或门禁失败时会拒绝发布。
+
 Top-7 覆盖率是语义复核阶段的上限参考，不等于最终准确率；只有在内网复核器
 完成独立留出集验证后，才能声明达到 80% 宏召回门槛。
 
