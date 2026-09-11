@@ -39,18 +39,18 @@ percentage as an evaluation result.
 Measured from the formal run on 2026-09-11:
 
 - Current report resolver: `F:\netease\_music\competition\runs\official-20260910\current.json` → `active_bundle` → `<BundleRoot>\<active_bundle>\report.json`
-- Observed active bundle for this run: `versions/64b19a1fcae24ca4b5588229208de39c`
-- Observed report for this run: `F:\netease\_music\competition\runs\official-20260910\versions\64b19a1fcae24ca4b5588229208de39c\report.json`
+- Observed active bundle for this run: `versions/9d8a75c1e79e49e2964d03b572f8b9bb`
+- Observed report for this run: `F:\netease\_music\competition\runs\official-20260910\versions\9d8a75c1e79e49e2964d03b572f8b9bb\report.json`
 - Official source file: `emotion_songs_20260910.xlsx`
 - Official source SHA-256: `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`
 - Official source raw rows: 5,894
 - Deduplicated official songs: 5,043 (4,034 official train; 1,009 official test; 0 split overlap)
 - Training augmentation: 54 song IDs from `emotion_songs_20260908_with_lrc.xlsx`; all 5,043 overlapping IDs were excluded, so no official test ID was added to training.
-- Model configuration: character TF-IDF (`char_wb`, n-grams 1–5, 150,000 features) with title/artist/genre metadata repeated five times and `OneVsRest(LinearSVC(C=0.3, class_weight=None))`; SVC margins are converted to a row softmax for API confidence fields.
-- Top-1: 0.6239600665557404 (601 strict-singleton test songs)
-- Macro recall: 0.5720495376898583
-- Any-positive Top-1: 0.6214073339940536
-- Strict-singleton Top-2 coverage: 0.7554076539101497
+- Model configuration: character TF-IDF (`char_wb`, n-grams 1–5, 150,000 features) with title/artist/genre metadata repeated five times and `OneVsRest(LinearSVC(C=0.3, class_weight=None))`; SVC margins are converted to a row softmax for API confidence fields. A versioned high-agreement artist override is applied to final ranking.
+- Top-1: 0.6356073211314476 (601 strict-singleton test songs)
+- Macro recall: 0.5827255283658489
+- Any-positive Top-1: 0.626362735381566
+- Strict-singleton Top-2 coverage: 0.7603993344425957
 - Strict-singleton Top-3 coverage: 0.8552412645590682
 - Strict-singleton Top-7 coverage: 0.9550748752079867
 - Strict-singleton Top-10 coverage: 0.9717138103161398
@@ -60,7 +60,14 @@ Measured from the formal run on 2026-09-11:
 - Any-positive Top-10 coverage: 0.9821605550049554
 - Evaluation sample counts: 1,009 any-positive; 601 strict-singleton; 408 multi-label
 
-This is a measured local improvement over the previous bundle (Top-1 0.608985, macro recall 0.560564), but it does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps the candidate-limited internal semantic reviewer enabled for low-margin requests. Its independent Dev/Test result must be recorded before claiming the competition target.
+The artist post-processing choice was checked on three independent 20% song-level
+seeds with the same training procedure. Strict Top-1 changed from 0.62396 to
+0.63561 (seed 20260910), from 0.56189 to 0.56678 (seed 20260912), and was
+unchanged at 0.56572 (seed 20260913). The corresponding macro recall changes
+were +0.01068, +0.00326, and +0.00071. This is a robustness check for the
+post-processing rule, not a hidden-set estimate.
+
+This is a measured local improvement over the previous bundle (Top-1 0.6239600665557404, macro recall 0.5720495376898583), but it does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps the candidate-limited internal semantic reviewer enabled for low-margin requests. Its independent Dev/Test result must be recorded before claiming the competition target.
 
 On this fixed Test, the default `margin < 0.10` route sends 536 of the 601
 strict-singleton songs to review; their correct label is present in the Top-10

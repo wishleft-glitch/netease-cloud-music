@@ -44,6 +44,18 @@ def song(song_id: str, labels: set[str], name: str, text: str) -> Song:
     )
 
 
+def song_with_artist(song_id: str, labels: set[str], name: str, artist: str, text: str) -> Song:
+    return Song(
+        song_id=song_id,
+        labels=frozenset(labels),
+        name=name,
+        artists=artist,
+        genre="",
+        text=text,
+        audio_url="",
+    )
+
+
 class TextScorerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.songs = [
@@ -110,6 +122,32 @@ class TextScorerTests(unittest.TestCase):
 
         self.assertEqual(scores.shape, (0, len(LABELS)))
 
+    def test_fit_builds_high_agreement_artist_override_and_applies_it(self) -> None:
+        songs = [
+            song_with_artist("1", {"狂欢"}, "a", "同一艺人", "party"),
+            song_with_artist("2", {"狂欢"}, "b", "同一艺人", "dance"),
+            song_with_artist("3", {"孤独"}, "c", "另一艺人", "lonely"),
+            song_with_artist("4", {"孤独"}, "d", "另一艺人", "alone"),
+        ]
+        scorer = TextScorer().fit(songs, LABELS)
+
+        self.assertEqual(scorer.artist_overrides, {"同一艺人": "狂欢", "另一艺人": "孤独"})
+        adjusted = scorer.apply_song_overrides(
+            songs[0], {"狂欢": 0.2, "孤独": 0.8}
+        )
+        self.assertGreater(adjusted["狂欢"], adjusted["孤独"])
+
+    def test_artist_override_requires_two_agreeing_training_songs(self) -> None:
+        songs = [
+            song_with_artist("1", {"狂欢"}, "a", "单首艺人", "party"),
+            song_with_artist("2", {"孤独"}, "b", "混合艺人", "lonely"),
+            song_with_artist("3", {"狂欢"}, "c", "混合艺人", "party"),
+        ]
+        scorer = TextScorer().fit(songs, LABELS)
+
+        self.assertNotIn("单首艺人", scorer.artist_overrides)
+        self.assertNotIn("混合艺人", scorer.artist_overrides)
+
     def test_single_label_configuration_rejects_missing_real_negatives(self) -> None:
         songs = [
             song("1", {"孤独"}, "一个人", "一个人 孤独"),
@@ -167,6 +205,7 @@ class TextScorerTests(unittest.TestCase):
             loaded = load_text_scorer(path, trusted=True)
 
             self.assertEqual(saved_payload["schema_version"], 2)
+            self.assertIn("artist_overrides", saved_payload)
             self.assertEqual(loaded.labels, LABELS)
             np.testing.assert_allclose(
                 list(loaded.score("一个人孤独没有你").values()),

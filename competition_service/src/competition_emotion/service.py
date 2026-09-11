@@ -477,6 +477,7 @@ def create_app(
         scores = await asyncio.to_thread(
             runtime.scorer.score, runtime.scorer.compose_text(song)
         )
+        scores = runtime.scorer.apply_song_overrides(song, scores)
         if not isinstance(scores, dict) or set(scores) != set(runtime.scorer.labels):
             raise RuntimeError("model returned invalid scores")
         ranked: list[tuple[str, float]] = []

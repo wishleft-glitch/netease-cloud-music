@@ -1,11 +1,11 @@
 # Official service cost estimate
 
-This is a planning formula, not a measured production cost or performance claim. The current observed artifact on 2026-09-11 is the active `versions/64b19a1fcae24ca4b5588229208de39c/model.joblib` under the official bundle pointer: 23,647,920 bytes (about 22.5 MiB). Its report declares model type `lyrics_tfidf_logreg`, model version `metadata-svc-v3`, and report schema version 2.
+This is a planning formula, not a measured production cost or performance claim. The current observed artifact on 2026-09-11 is the active `versions/9d8a75c1e79e49e2964d03b572f8b9bb/model.joblib` under the official bundle pointer. Its report declares model type `lyrics_tfidf_logreg`, model version `metadata-svc-v4`, and report schema version 2.
 
 | Cost component | Formula per recognition request | Current input/status |
 | --- | --- | --- |
 | CPU | CPU core seconds × internal rate | Measure CPU core seconds in the target host; internal rate is finance-owned. |
-| Model storage | 23,647,920 bytes / bytes-per-GiB × storage rate × retention fraction | Current observed model artifact size; storage rate is environment-specific. |
+| Model storage | 23,650,664 bytes / bytes-per-GiB × storage rate × retention fraction | Current observed model artifact size; storage rate is environment-specific. |
 | Audio transfer/decode | downloaded GiB × network rate + CPU core seconds × internal rate | Optional; record only when audio measurement is enabled. |
 | External LLM tokens | input tokens × input-token rate + output tokens × output-token rate | not enabled / 0 |
 | Total | sum of the rows above | Unknown until measured in the target environment. |
@@ -16,6 +16,6 @@ P50 latency is unavailable until an end-to-end benchmark is measured on the depl
 
 ## Formal accuracy provenance
 
-The exact formal source is [`official-self-evaluation.md`](official-self-evaluation.md), which identifies the active `report.json`. That report's source provenance is `emotion_songs_20260910.xlsx`, SHA-256 `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`, with 5,894 raw rows. For model version `metadata-svc-v3`, its formal held-out metrics are `evaluation_metrics.strict_top1_accuracy = 0.6239600665557404` on 601 strict-singleton test songs, and `evaluation_metrics.macro_recall = 0.5720495376898583`. The report also records strict-singleton Top-2 coverage of `0.7554076539101497`, Top-3 coverage of `0.8552412645590682`, Top-7 coverage of `0.9550748752079867`, Top-10 coverage of `0.9717138103161398`, 1,009 any-positive held-out songs, and 408 multi-label held-out songs.
+The exact formal source is [`official-self-evaluation.md`](official-self-evaluation.md), which identifies the active `report.json`. That report's source provenance is `emotion_songs_20260910.xlsx`, SHA-256 `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`, with 5,894 raw rows. For model version `metadata-svc-v4`, its formal held-out metrics are `evaluation_metrics.strict_top1_accuracy = 0.6356073211314476` on 601 strict-singleton test songs, and `evaluation_metrics.macro_recall = 0.5827255283658489`. The report also records strict-singleton Top-2 coverage of `0.7603993344425957`, Top-3 coverage of `0.8552412645590682`, Top-7 coverage of `0.9550748752079867`, Top-10 coverage of `0.9717138103161398`, 1,009 any-positive held-out songs, and 408 multi-label held-out songs.
 
 These are offline baseline evaluation metrics, not a production accuracy guarantee. The report does not publish end-to-end latency percentiles, QPS, or cost.

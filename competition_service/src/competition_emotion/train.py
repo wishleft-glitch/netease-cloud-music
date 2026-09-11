@@ -233,6 +233,7 @@ def train_text_baseline(
 
     scorer = TextScorer().fit(train_songs, configured_labels)
     scores = scorer.score_many([_text_for_score(song) for song in test_songs])
+    scores = scorer.apply_song_overrides_many(test_songs, scores)
     evaluation = metric_report(_targets(test_songs, configured_labels), scores, configured_labels)
     evaluation.update(
         _top_k_metrics(_targets(test_songs, configured_labels), scores, k=2)
@@ -254,6 +255,11 @@ def train_text_baseline(
         "model_version": MODEL_VERSION,
         "model_input_mode": scorer.input_mode,
         "score_mode": scorer.score_mode,
+        "postprocessing": {
+            "artist_override_min_songs": 2,
+            "artist_override_min_agreement": 0.8,
+            "artist_override_count": len(scorer.artist_overrides),
+        },
         "source": source,
         "labels": list(configured_labels),
         "seed": seed,
