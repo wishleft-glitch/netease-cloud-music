@@ -56,7 +56,7 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `AudioBudgetSeconds` | Per-request audio budget | Greater than 0 and no more than 25; default 20. |
 | `MaxConcurrentAudio` | Non-queuing audio capacity | Positive integer; tune using saturation data. |
 
-Restart with the same explicit nonsecret settings. The restart script canonicalizes its IP literal before comparison, then refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, canonical host, and port argument, and its Windows process creation time matches the recorded start time.
+Restart with the same explicit nonsecret settings. The restart script canonicalizes its IP literal before comparison, then refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, canonical host, and port argument, and its Windows process creation time matches the recorded start time. It holds the same OS-level state reservation used by start from the state check through process stop, state removal, and publication of the replacement state, so a concurrent stale-state start waits for the completed restart.
 
 ```powershell
 & .\\competition_service\\scripts\\restart_service.ps1 `

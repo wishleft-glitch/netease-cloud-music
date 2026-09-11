@@ -49,17 +49,20 @@ function Get-CommandLineOptionValues {
     return @([regex]::Matches($CommandLine, $pattern) | ForEach-Object { $_.Groups["value"].Value })
 }
 
-if (-not (Test-Path -LiteralPath $BundleRoot -PathType Container)) {
-    throw "BundleRoot must be an existing directory."
-}
-$resolvedBundleRoot = (Resolve-Path -LiteralPath $BundleRoot).Path
-$canonicalBindHost = Get-CanonicalBindHost -HostValue $BindHost
-if ([string]::IsNullOrWhiteSpace($StateFile)) {
-    $resolvedStateFile = Join-Path $resolvedBundleRoot "service-state.json"
-}
-else {
-    $resolvedStateFile = [System.IO.Path]::GetFullPath($StateFile)
-}
+$startScript = Join-Path $PSScriptRoot "start_service.ps1"
+. $startScript -BundleRoot $BundleRoot -BindHost $BindHost -Port $Port -StateFile $StateFile `
+    -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
+    -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+
+$configuration = Get-ServiceLaunchConfiguration -BundleRoot $BundleRoot -BindHost $BindHost -Port $Port `
+    -StateFile $StateFile -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost `
+    -AudioTempRoot $AudioTempRoot -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+$resolvedBundleRoot = $configuration.resolved_bundle_root
+$canonicalBindHost = $configuration.canonical_bind_host
+$resolvedStateFile = $configuration.resolved_state_file
+$stateReservation = $null
+try {
+    $stateReservation = Acquire-StateReservation -StatePath $resolvedStateFile
 if (-not (Test-Path -LiteralPath $resolvedStateFile -PathType Leaf)) {
     throw "State file was not found. Refusing to stop any process."
 }
@@ -121,9 +124,17 @@ if ((Get-NormalizedProcessCreationTime -Process $process) -cne $state.start_time
 
 Stop-Process -Id $statePid -Force
 Wait-Process -Id $statePid -Timeout 15 -ErrorAction SilentlyContinue
+if ($null -ne (Get-Process -Id $statePid -ErrorAction SilentlyContinue)) {
+    throw "State PID did not stop. Refusing to remove state."
+}
 Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
 
-$startScript = Join-Path $PSScriptRoot "start_service.ps1"
-& $startScript -BundleRoot $resolvedBundleRoot -BindHost $canonicalBindHost -Port $Port -StateFile $resolvedStateFile `
+Start-CompetitionEmotionService -Configuration $configuration -StateReservation $stateReservation -ReplaceStaleState `
     -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
     -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+}
+finally {
+    if ($null -ne $stateReservation) {
+        $stateReservation.Dispose()
+    }
+}

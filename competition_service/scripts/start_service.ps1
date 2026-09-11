@@ -219,11 +219,19 @@ function Get-ExistingStateStatus {
     }
 }
 
-$startedProcess = $null
-$resolvedStateFile = $null
-$stateReservation = $null
-$statePublishedByThisInvocation = $false
-try {
+function Get-ServiceLaunchConfiguration {
+    param(
+        [string]$BundleRoot,
+        [string]$BindHost,
+        [int]$Port,
+        [string]$StateFile,
+        [string]$AudioProxyUrl,
+        [string[]]$AudioAllowedHost,
+        [string]$AudioTempRoot,
+        [double]$AudioBudgetSeconds,
+        [int]$MaxConcurrentAudio
+    )
+
     if (-not ($Port -is [int]) -or $Port -lt 1 -or $Port -gt 65535) {
         throw "Port must be an integer between 1 and 65535."
     }
@@ -252,7 +260,52 @@ try {
         throw "StateFile must include a directory."
     }
     New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
-    $stateReservation = Acquire-StateReservation -StatePath $resolvedStateFile
+    return [pscustomobject]@{
+        canonical_bind_host = $canonicalBindHost
+        resolved_bundle_root = $resolvedBundleRoot
+        resolved_state_file = $resolvedStateFile
+        state_directory = $stateDirectory
+        port = $Port
+    }
+}
+
+function Start-CompetitionEmotionService {
+    param(
+        [Parameter(Mandatory)]$Configuration,
+        [Parameter(Mandatory)][System.IO.FileStream]$StateReservation,
+        [switch]$ReplaceStaleState,
+        [string]$AudioProxyUrl,
+        [string[]]$AudioAllowedHost,
+        [string]$AudioTempRoot,
+        [double]$AudioBudgetSeconds,
+        [int]$MaxConcurrentAudio
+    )
+
+    $allowedCallerPaths = @(
+        [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "start_service.ps1")),
+        [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "restart_service.ps1"))
+    )
+    $callerPath = if ([string]::IsNullOrWhiteSpace($MyInvocation.ScriptName)) {
+        $null
+    }
+    else {
+        [System.IO.Path]::GetFullPath($MyInvocation.ScriptName)
+    }
+    $expectedReservationPath = "$($Configuration.resolved_state_file).launch.lock"
+    if ($null -eq $callerPath -or $callerPath -notin $allowedCallerPaths -or
+        -not $StateReservation.CanRead -or -not $StateReservation.CanWrite -or
+        $StateReservation.Name -cne $expectedReservationPath) {
+        throw "The service launch helper requires a matching reservation from the start or restart script."
+    }
+
+    $startedProcess = $null
+    $statePublishedByThisInvocation = $false
+    try {
+        $resolvedStateFile = $Configuration.resolved_state_file
+        $resolvedBundleRoot = $Configuration.resolved_bundle_root
+        $canonicalBindHost = $Configuration.canonical_bind_host
+        $stateDirectory = $Configuration.state_directory
+        $Port = [int]$Configuration.port
     $existingStateSnapshot = Get-StateSnapshot -Path $resolvedStateFile
     $existingStateStatus = Get-ExistingStateStatus -Snapshot $existingStateSnapshot
     if ($existingStateStatus -eq "LiveOwned") {
@@ -325,8 +378,8 @@ try {
     Write-Host "Service started: PID $($startedProcess.Id), $canonicalBindHost`:$Port"
     Write-Host "State file: $resolvedStateFile"
     Write-Host "Logs: $logDirectory"
-}
-catch {
+    }
+    catch {
     if ($null -ne $startedProcess) {
         Stop-Process -InputObject $startedProcess -Force -ErrorAction SilentlyContinue
     }
@@ -335,8 +388,23 @@ catch {
     }
     throw
 }
-finally {
-    if ($null -ne $stateReservation) {
-        $stateReservation.Dispose()
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    $stateReservation = $null
+    try {
+        $configuration = Get-ServiceLaunchConfiguration -BundleRoot $BundleRoot -BindHost $BindHost -Port $Port `
+            -StateFile $StateFile -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost `
+            -AudioTempRoot $AudioTempRoot -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+        $stateReservation = Acquire-StateReservation -StatePath $configuration.resolved_state_file
+        Start-CompetitionEmotionService -Configuration $configuration -StateReservation $stateReservation `
+            -ReplaceStaleState:$ReplaceStaleState `
+            -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
+            -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio
+    }
+    finally {
+        if ($null -ne $stateReservation) {
+            $stateReservation.Dispose()
+        }
     }
 }
