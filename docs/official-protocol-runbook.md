@@ -4,7 +4,7 @@
 
 `client -> nonloopback listener -> FastAPI request validation -> metadata-aware local model -> optional candidate-limited semantic review -> optional audio acquisition -> response`.
 
-The service loads the immutable bundle selected by `BundleRoot\\current.json` at startup. The local model ranks all 15 labels and returns one label plus a second candidate. When an optional semantic review URL is configured and the local margin is below the configured threshold, the reviewer may choose only from the local Top-7 candidates. The reviewer also receives the versioned soft Rubric context and must return a lyric quote that occurs in the supplied lyrics plus any Rubric rule IDs it used. An invalid, slow, or unavailable reviewer result falls back to the local ranking. The two models in the complete chain are the local classifier and the optional semantic reviewer; audio measurement is a bounded evidence path and does not change ranked labels. The formal held-out limitations are recorded in [`official-self-evaluation.md`](official-self-evaluation.md); no hidden-set accuracy claim follows from that evaluation.
+The service loads the immutable bundle selected by `BundleRoot\\current.json` at startup. The local model ranks all 15 labels and returns one label plus a second candidate. When an optional semantic review URL is configured and the local margin is below the configured threshold, the reviewer may choose only from the local Top-10 candidates. The reviewer also receives the versioned soft Rubric context and must return a lyric quote that occurs in the supplied lyrics plus any Rubric rule IDs it used. An invalid, slow, or unavailable reviewer result falls back to the local ranking. The two models in the complete chain are the local classifier and the optional semantic reviewer; audio measurement is a bounded evidence path and does not change ranked labels. The formal held-out limitations are recorded in [`official-self-evaluation.md`](official-self-evaluation.md); no hidden-set accuracy claim follows from that evaluation.
 
 Direct audio mode resolves and accepts only security-pinned public addresses. Proxy mode requires both a proxy origin and an exact allowlist of permitted DNS hosts. Do not use a proxy without the exact allowlist.
 
@@ -61,7 +61,7 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `EMOTION_SEMANTIC_RERANKER_URL` | Optional internal candidate reviewer | Set only to an approved internal HTTP(S) endpoint (`.internal`, `.local`, `.corp`, or private IP); leave empty to disable. |
 | `--semantic-reranker-timeout-seconds` | Reviewer timeout | 0.1–10 seconds; keep below the overall 25-second request budget. |
 | `--semantic-reranker-min-gap` | Local score gap below which review runs | Default 0.10; calibrate on a separate validation set. |
-| `--semantic-reranker-candidate-count` | Number of local candidates supplied to the reviewer | Default 7; valid range 2–15; larger pools improve coverage but increase review ambiguity and prompt size. |
+| `--semantic-reranker-candidate-count` | Number of local candidates supplied to the reviewer | Default 10; valid range 2–15; larger pools improve coverage but increase review ambiguity and prompt size. |
 
 The Dev/calibration manifest is created offline from the fixed Train portion:
 
@@ -69,6 +69,16 @@ The Dev/calibration manifest is created offline from the fixed Train portion:
 py -3.12 -m competition_emotion.calibration `
   --workbook 'F:\\netease\\_music\\competition\\data\\emotion_songs_20260910.xlsx' `
   --output 'F:\\netease\\_music\\competition\\runs\\official-20260910\\calibration-20260911.json'
+```
+
+The current candidate bundle was trained with the 54 IDs unique to the older
+`emotion_songs_20260908_with_lrc.xlsx` snapshot. The trainer excludes all IDs
+that already exist in the official workbook, records both source hashes in the
+report, and can reproduce it with:
+
+```powershell
+.\competition_service\scripts\train_official.ps1 `
+  -AugmentWorkbook 'F:\netease\_music\competition\data\emotion_songs_20260908_with_lrc.xlsx'
 ```
 
 Use `read_traces` and `mine_hard_cases` to build a review queue, then evaluate a

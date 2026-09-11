@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Workbook = "F:\netease\_music\competition\data\emotion_songs_20260910.xlsx",
-    [string]$BundleRoot = "F:\netease\_music\competition\runs\official-20260910"
+    [string]$BundleRoot = "F:\netease\_music\competition\runs\official-20260910",
+    [string]$AugmentWorkbook = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,17 +10,27 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path -LiteralPath $Workbook -PathType Leaf)) {
     throw "Official workbook was not found: $Workbook"
 }
+if ($AugmentWorkbook -and -not (Test-Path -LiteralPath $AugmentWorkbook -PathType Leaf)) {
+    throw "Augmentation workbook was not found: $AugmentWorkbook"
+}
 
 $serviceRoot = Split-Path -Parent $PSScriptRoot
+$previousPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = Join-Path $serviceRoot "src"
 Push-Location $serviceRoot
 try {
-    & py -3.12 -m competition_emotion.train --workbook $Workbook --bundle-dir $BundleRoot
+    $trainArgs = @("-3.12", "-m", "competition_emotion.train", "--workbook", $Workbook, "--bundle-dir", $BundleRoot)
+    if ($AugmentWorkbook) {
+        $trainArgs += @("--augment-workbook", $AugmentWorkbook)
+    }
+    & py @trainArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Official training exited with code $LASTEXITCODE"
     }
 }
 finally {
     Pop-Location
+    $env:PYTHONPATH = $previousPythonPath
 }
 
 $currentPath = Join-Path $BundleRoot "current.json"

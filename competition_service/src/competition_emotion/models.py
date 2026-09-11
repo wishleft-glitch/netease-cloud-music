@@ -22,6 +22,7 @@ from .audio import FEATURE_NAMES, feature_vector
 _SCHEMA_VERSION = 2
 _EMPTY_TEXT_SENTINEL = "[no_text]"
 _MODEL_METADATA_REPEATS = 5
+_TEXT_CLASS_WEIGHT = None
 _SCORE_MODES = frozenset({"probability", "softmax"})
 _INPUT_MODES = frozenset({"legacy", "metadata_v1"})
 
@@ -136,7 +137,7 @@ class TextScorer:
         )
         features = vectorizer.fit_transform([_metadata_song_text(song) for song in songs])
         classifier = OneVsRestClassifier(
-            LinearSVC(C=0.3, class_weight="balanced")
+            LinearSVC(C=0.3, class_weight=_TEXT_CLASS_WEIGHT)
         )
         classifier.fit(features, targets)
 

@@ -192,19 +192,43 @@ def train_text_baseline(
     labels: Sequence[str] = LABELS,
     seed: int = 20260910,
     test_ratio: float = 0.2,
+    augment_workbook: Path | None = None,
 ) -> dict[str, Any]:
-    """Train and evaluate the lyrics baseline with a song-group-safe split."""
+    """Train and evaluate with an official song-group-safe split.
+
+    An optional augmentation workbook contributes only song IDs absent from
+    the official source.  This prevents an older snapshot from duplicating an
+    official test song while still allowing independently sourced labelled
+    songs to improve the fit set.
+    """
     configured_labels = tuple(labels)
     source_workbook = Path(workbook)
     with workbook_snapshot(source_workbook) as (snapshot_path, source):
         songs = load_official_songs(snapshot_path)
+    augmentation_report: dict[str, Any] | None = None
+    augmentation_songs: list[Song] = []
+    if augment_workbook is not None:
+        augmentation_path = Path(augment_workbook)
+        with workbook_snapshot(augmentation_path) as (snapshot_path, augmentation_source):
+            candidate_songs = load_official_songs(snapshot_path)
+        official_ids = {song.song_id for song in songs}
+        augmentation_songs = [
+            song for song in candidate_songs if song.song_id not in official_ids
+        ]
+        augmentation_report = {
+            "sources": [augmentation_source],
+            "candidate_songs": len(candidate_songs),
+            "added_songs": len(augmentation_songs),
+            "excluded_overlap_songs": len(candidate_songs) - len(augmentation_songs),
+        }
     assignment = make_holdout(songs, test_ratio=test_ratio, seed=seed)
-    train_songs = [song for song in songs if song.song_id in assignment.train_ids]
+    official_train_songs = [song for song in songs if song.song_id in assignment.train_ids]
+    train_songs = official_train_songs + augmentation_songs
     test_songs = [song for song in songs if song.song_id in assignment.test_ids]
     overlap = set(assignment.train_ids) & set(assignment.test_ids)
     if overlap:
         raise ValueError("train and test song IDs overlap")
-    if len(train_songs) != len(assignment.train_ids) or len(test_songs) != len(assignment.test_ids):
+    if len(official_train_songs) != len(assignment.train_ids) or len(test_songs) != len(assignment.test_ids):
         raise ValueError("split song IDs do not reconcile with the loaded data")
 
     scorer = TextScorer().fit(train_songs, configured_labels)
@@ -218,6 +242,9 @@ def train_text_baseline(
     )
     evaluation.update(
         _top_k_metrics(_targets(test_songs, configured_labels), scores, k=7)
+    )
+    evaluation.update(
+        _top_k_metrics(_targets(test_songs, configured_labels), scores, k=10)
     )
     predictions = _prediction_records(test_songs, scores, configured_labels)
 
@@ -248,6 +275,8 @@ def train_text_baseline(
         },
         "evaluation_metrics": evaluation,
     }
+    if augmentation_report is not None:
+        report["training_augmentation"] = augmentation_report
 
     _publish_bundle(Path(bundle_dir), scorer, report, predictions)
     return report
@@ -259,6 +288,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bundle-dir", required=True, type=Path)
     parser.add_argument("--seed", default=20260910, type=int)
     parser.add_argument("--test-ratio", default=0.2, type=float)
+    parser.add_argument(
+        "--augment-workbook",
+        type=Path,
+        help="optional labelled workbook; only song IDs absent from the official source are added",
+    )
     arguments = parser.parse_args(argv)
 
     report = train_text_baseline(
@@ -266,6 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments.bundle_dir,
         seed=arguments.seed,
         test_ratio=arguments.test_ratio,
+        augment_workbook=arguments.augment_workbook,
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0

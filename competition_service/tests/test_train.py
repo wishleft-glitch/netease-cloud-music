@@ -148,6 +148,7 @@ class TrainTextBaselineTests(unittest.TestCase):
                 "multi_label_sample_count": 1,
             })
             self.assertIn("strict_top1_accuracy", report["evaluation_metrics"])
+            self.assertIn("strict_singleton_top10_hit_rate", report["evaluation_metrics"])
             self.assertEqual(set(report["label_support"]["train"]), set(LABELS))
 
             pointer = json.loads((bundle_dir / "current.json").read_text(encoding="utf-8"))
@@ -188,6 +189,53 @@ class TrainTextBaselineTests(unittest.TestCase):
             self.assertTrue((version_dir / "report.json").is_file())
             self.assertTrue((version_dir / "predictions.jsonl").is_file())
             self.assertEqual(list(bundle_dir.glob(".staging-*")), [])
+
+    def test_optional_augmentation_adds_only_song_ids_outside_official_source(self) -> None:
+        rows = []
+        for index in range(12):
+            label = LABELS[index % 2]
+            rows.append(
+                {
+                    "歌曲id": str(index + 1),
+                    "情绪类型": label,
+                    "歌曲名称": f"official {index}",
+                    "一级曲风标签": "流行",
+                    "演唱艺人": f"艺人{index}",
+                    "文本歌词": "派对 跳舞 欢呼" if label == "狂欢" else "一个人 夜晚 寂寞",
+                    "音频下载地址": "",
+                    "lrc歌词（滚词）": "",
+                    "翻译歌词": "",
+                }
+            )
+        augmentation = [
+            {**rows[0], "歌曲id": "1"},
+            {**rows[1], "歌曲id": "extra-1", "歌曲名称": "extra"},
+        ]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workbook = root / "official.xlsx"
+            extra_workbook = root / "extra.xlsx"
+            bundle_dir = root / "bundle"
+            pd.DataFrame(rows, columns=REQUIRED_COLUMNS).to_excel(workbook, index=False)
+            pd.DataFrame(augmentation, columns=REQUIRED_COLUMNS).to_excel(extra_workbook, index=False)
+
+            report = train_text_baseline(
+                workbook,
+                bundle_dir,
+                labels=LABELS,
+                seed=19,
+                test_ratio=0.25,
+                augment_workbook=extra_workbook,
+            )
+
+            self.assertEqual(report["counts"]["total_songs"], 12)
+            self.assertEqual(report["counts"]["train_songs"], 10)
+            self.assertEqual(report["training_augmentation"]["added_songs"], 1)
+            self.assertEqual(report["training_augmentation"]["excluded_overlap_songs"], 1)
+            self.assertEqual(
+                report["training_augmentation"]["sources"][0]["file_name"],
+                "extra.xlsx",
+            )
 
 
 if __name__ == "__main__":

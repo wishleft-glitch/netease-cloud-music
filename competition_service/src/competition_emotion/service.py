@@ -661,7 +661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         semantic_candidate_count = (
             arguments.semantic_reranker_candidate_count
             if arguments.semantic_reranker_candidate_count is not None
-            else int(os.environ.get("SEMANTIC_RERANKER_CANDIDATE_COUNT", "7"))
+            else int(os.environ.get("SEMANTIC_RERANKER_CANDIDATE_COUNT", "10"))
         )
     except ValueError:
         parser.error("semantic reviewer environment values must be numeric")

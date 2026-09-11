@@ -28,7 +28,7 @@ class SemanticReviewTests(unittest.TestCase):
 
     def test_config_defaults_to_cost_bounded_review_gap(self) -> None:
         self.assertEqual(self.config.min_score_gap, 0.10)
-        self.assertEqual(self.config.candidate_count, 7)
+        self.assertEqual(self.config.candidate_count, 10)
 
     def test_review_sends_song_context_and_accepts_only_a_candidate(self) -> None:
         response = MagicMock()

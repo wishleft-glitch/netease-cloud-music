@@ -65,6 +65,7 @@ class TextScorerTests(unittest.TestCase):
         self.assertEqual(self.scorer.vectorizer.max_features, 150000)
         self.assertIsInstance(self.scorer.classifier.estimators_[0], LinearSVC)
         self.assertEqual(self.scorer.classifier.estimators_[0].C, 0.3)
+        self.assertIsNone(self.scorer.classifier.estimators_[0].class_weight)
 
     def test_model_text_repeats_metadata_and_strips_loader_prefix(self) -> None:
         loaded = song("1", {"狂欢"}, "夏日狂欢", "派对跳舞")
