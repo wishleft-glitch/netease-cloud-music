@@ -65,10 +65,12 @@ This is a measured local improvement over the previous bundle (Top-1 0.608985, m
 On this fixed Test, the default `margin < 0.10` route sends 536 of the 601
 strict-singleton songs to review; their correct label is present in the Top-10
 pool for 97.01% of routed songs, while the 65 directly released songs are
-96.92% correct. Therefore a reviewer that selects the correct candidate on at
-least 94.8% of routed singleton cases would clear 95% overall on this split.
-This is a readiness calculation, not a claimed reviewer result; it must be
-replaced with measurements from the actual internal endpoint.
+96.92% correct. This is only a candidate-pool recall check. Because there are
+15 labels, an uninformative pool of 10 labels would already cover about 66.7%;
+97.01% must not be reported as 97% accuracy. Conditionally, a reviewer that
+selects the correct candidate on at least 94.8% of routed singleton cases would
+clear 95% overall on this split. That is a readiness calculation, not a
+measured reviewer result; the actual endpoint must be evaluated end to end.
 
 ## Rubric, evidence, and calibration controls
 
