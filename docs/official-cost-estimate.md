@@ -5,7 +5,7 @@ This is a planning formula, not a measured production cost or performance claim.
 | Cost component | Formula per recognition request | Current input/status |
 | --- | --- | --- |
 | CPU | CPU core seconds × internal rate | Measure CPU core seconds in the target host; internal rate is finance-owned. |
-| Model storage | 23,643,432 bytes / bytes-per-GiB × storage rate × retention fraction | Current observed model artifact size; storage rate is environment-specific. |
+| Model storage | 23,628,344 bytes / bytes-per-GiB × storage rate × retention fraction | Current observed model artifact size; storage rate is environment-specific. |
 | Audio transfer/decode | downloaded GiB × network rate + CPU core seconds × internal rate | Optional; record only when audio measurement is enabled. |
 | External LLM tokens | input tokens × input-token rate + output tokens × output-token rate | not enabled / 0 |
 | Total | sum of the rows above | Unknown until measured in the target environment. |
