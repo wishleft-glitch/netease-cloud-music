@@ -3,7 +3,7 @@
 Run the formal baseline from the repository checkout:
 
 ```powershell
-& .\competition_service\scripts\train_official.ps1
+& .\competition_service\scripts\train_official.ps1 -FitAllForServing
 ```
 
 The command publishes an immutable versioned bundle under
@@ -53,26 +53,26 @@ Measured from the formal run on 2026-09-12:
 - Macro recall: 0.5297771410720183
 - Any-positive Top-1: 0.5877106045589693
 - Strict-singleton Top-2 coverage: 0.7487520798668885
-- Strict-singleton Top-3 coverage: 0.8186356073211315
+- Strict-singleton Top-3 coverage: 0.8219633943427621
 - Strict-singleton Top-7 coverage: 0.9484193011647255
 - Strict-singleton Top-10 coverage: 0.9767054908485857
-- Any-positive Top-2 coverage: 0.7641228939544104
-- Any-positive Top-3 coverage: 0.8374628344895937
-- Any-positive Top-7 coverage: 0.9663032705649157
-- Any-positive Top-10 coverage: 0.9871159563924677
+- Any-positive Top-2 coverage: 0.7631318136769079
+- Any-positive Top-3 coverage: 0.8434093161546086
+- Any-positive Top-7 coverage: 0.9643211100099108
+- Any-positive Top-10 coverage: 0.9861248761149654
 - Evaluation sample counts: 1,009 any-positive; 601 strict-singleton; 408 multi-label
 
 The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v6 score. The v6 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. Their independent Dev/Test result must be recorded before claiming the competition target.
 
-On this fixed Test, the default `margin < 0.10` route sends 567 of the 601
-strict-singleton songs to review. The adaptive pool uses 10 candidates for 395
-hard cases, 7 for 104 cases, and 5 for 68 cases: 8.85 candidates per reviewed
-song on average, about 11.5% fewer candidate slots than a fixed Top-10 pool.
-The correct label remains in the adaptive pool for 97.1781% of routed songs;
-the 34 directly released songs are 97.06% correct. This is only a candidate-pool
+On this fixed Test, the default `margin < 0.10` route sends 568 of the 601
+strict-singleton songs to review. The adaptive pool uses 10 candidates for 397
+hard cases, 7 for 103 cases, and 5 for 68 cases: 8.84 candidates per reviewed
+song on average, about 11.6% fewer candidate slots than a fixed Top-10 pool.
+The correct label remains in the adaptive pool for 97.1831% of routed songs;
+the 33 directly released songs are 96.97% correct. This is only a candidate-pool
 recall check. Because there are 15 labels, an uninformative pool of 10 labels
-would already cover about 66.7%; 97.1781% must not be reported as 97% accuracy. Conditionally, a reviewer that
-selects the correct candidate on at least 95.3% of routed singleton cases would
+would already cover about 66.7%; 97.1831% must not be reported as 97% accuracy. Conditionally, a reviewer that
+selects the correct candidate on at least 94.9% of routed singleton cases would
 clear 95% overall on this split. That is a readiness calculation, not a
 measured reviewer result; the actual endpoint must be evaluated end to end.
 

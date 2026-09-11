@@ -22,7 +22,7 @@ class SemanticReviewConfig:
     url: str
     timeout_seconds: float = 3.0
     min_score_gap: float = 0.10
-    # Ten candidates retain 97.84% strict-singleton coverage on the fixed
+    # Ten candidates retain 97.67% strict-singleton coverage on the fixed
     # official holdout while keeping the reviewer prompt bounded.
     candidate_count: int = 10
     require_verified_evidence: bool = True
