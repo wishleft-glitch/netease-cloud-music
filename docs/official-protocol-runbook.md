@@ -31,7 +31,7 @@ Start a service on a private interface. Substitute the actual bundle path, IP, a
   -MaxConcurrentAudio 4
 ```
 
-The launcher starts a hidden child process, creates `logs\\service` under the bundle root, and atomically writes `service-state.json` only after the PID and its machine-parseable process creation time are present. The state file contains only PID, bind host, port, start time, and bundle root. It never stores the proxy URL or request URLs. A live owned state file blocks a second start. A stale or invalid state requires an operator review and an explicit `-ReplaceStaleState` on the next start; launch failures never remove a pre-existing state file.
+The launcher canonicalizes the supplied IP literal before passing it to Python and storing it in state (for example, `0` becomes `0.0.0.0`). It starts a hidden child process, creates `logs\\service` under the bundle root, and atomically writes `service-state.json` only after the PID and its machine-parseable process creation time are present. The state file contains only PID, canonical bind host, port, start time, and bundle root. It never stores the proxy URL or request URLs. An OS-level exclusive reservation for the state path is held from state inspection through publication, so concurrent launchers cannot replace one another's state. A live owned state file blocks a second start. A stale or invalid state requires an operator review and an explicit `-ReplaceStaleState` on the next start; the launcher revalidates the exact stale file before removal, and launch failures never remove a pre-existing state file.
 
 Health-check locally from an authorized management host:
 
@@ -56,7 +56,7 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `AudioBudgetSeconds` | Per-request audio budget | Greater than 0 and no more than 25; default 20. |
 | `MaxConcurrentAudio` | Non-queuing audio capacity | Positive integer; tune using saturation data. |
 
-Restart with the same explicit nonsecret settings. The restart script reads the state file but refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, host, and port argument, and its Windows process creation time matches the recorded start time.
+Restart with the same explicit nonsecret settings. The restart script canonicalizes its IP literal before comparison, then refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, canonical host, and port argument, and its Windows process creation time matches the recorded start time.
 
 ```powershell
 & .\\competition_service\\scripts\\restart_service.ps1 `

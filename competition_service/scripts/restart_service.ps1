@@ -15,6 +15,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-CanonicalBindHost {
+    param([string]$HostValue)
+
+    $address = [System.Net.IPAddress]::None
+    if (-not [System.Net.IPAddress]::TryParse($HostValue, [ref]$address)) {
+        throw "BindHost must be an IP literal; DNS names are not accepted."
+    }
+    if ([System.Net.IPAddress]::IsLoopback($address)) {
+        throw "BindHost must not be a loopback address."
+    }
+    return $address.ToString()
+}
+
 function Get-NormalizedProcessCreationTime {
     param($Process)
 
@@ -40,6 +53,7 @@ if (-not (Test-Path -LiteralPath $BundleRoot -PathType Container)) {
     throw "BundleRoot must be an existing directory."
 }
 $resolvedBundleRoot = (Resolve-Path -LiteralPath $BundleRoot).Path
+$canonicalBindHost = Get-CanonicalBindHost -HostValue $BindHost
 if ([string]::IsNullOrWhiteSpace($StateFile)) {
     $resolvedStateFile = Join-Path $resolvedBundleRoot "service-state.json"
 }
@@ -75,7 +89,7 @@ catch {
     throw "Invalid state schema. Refusing to stop any process."
 }
 if ($normalizedStateTime -cne $state.start_time_utc -or
-    $stateBundleRoot -cne $resolvedBundleRoot -or $state.bind_host -cne $BindHost -or $state.port -ne $Port) {
+    $stateBundleRoot -cne $resolvedBundleRoot -or $state.bind_host -cne $canonicalBindHost -or $state.port -ne $Port) {
     throw "State does not match the requested nonsecret service settings. Refusing to stop any process."
 }
 
@@ -110,6 +124,6 @@ Wait-Process -Id $statePid -Timeout 15 -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
 
 $startScript = Join-Path $PSScriptRoot "start_service.ps1"
-& $startScript -BundleRoot $resolvedBundleRoot -BindHost $BindHost -Port $Port -StateFile $resolvedStateFile `
+& $startScript -BundleRoot $resolvedBundleRoot -BindHost $canonicalBindHost -Port $Port -StateFile $resolvedStateFile `
     -AudioProxyUrl $AudioProxyUrl -AudioAllowedHost $AudioAllowedHost -AudioTempRoot $AudioTempRoot `
     -AudioBudgetSeconds $AudioBudgetSeconds -MaxConcurrentAudio $MaxConcurrentAudio

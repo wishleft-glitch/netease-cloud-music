@@ -24,7 +24,7 @@ function Resolve-BundleRoot {
     return (Resolve-Path -LiteralPath $Path).Path
 }
 
-function Assert-BindHost {
+function Get-CanonicalBindHost {
     param([string]$HostValue)
     $address = [System.Net.IPAddress]::None
     if (-not [System.Net.IPAddress]::TryParse($HostValue, [ref]$address)) {
@@ -33,6 +33,7 @@ function Assert-BindHost {
     if ([System.Net.IPAddress]::IsLoopback($address)) {
         throw "BindHost must not be a loopback address."
     }
+    return $address.ToString()
 }
 
 function Assert-AudioConfiguration {
@@ -115,14 +116,70 @@ function Get-CommandLineOptionValues {
     return @([regex]::Matches($CommandLine, $pattern) | ForEach-Object { $_.Groups["value"].Value })
 }
 
-function Get-ExistingStateStatus {
+function Acquire-StateReservation {
+    param([string]$StatePath)
+
+    $reservationPath = "$($StatePath).launch.lock"
+    try {
+        return [System.IO.File]::Open(
+            $reservationPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    }
+    catch [System.IO.IOException] {
+        throw "Another launcher currently owns the state reservation. Retry after it finishes."
+    }
+}
+
+function Get-StateSnapshot {
     param([string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    $file = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $content = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = ([BitConverter]::ToString($hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($content)))).Replace("-", "")
+    }
+    finally {
+        $hasher.Dispose()
+    }
+    return [pscustomobject]@{
+        content = $content
+        length = $file.Length
+        creation_time_utc = $file.CreationTimeUtc.Ticks
+        last_write_time_utc = $file.LastWriteTimeUtc.Ticks
+        sha256 = $hash
+    }
+}
+
+function Test-StateSnapshotUnchanged {
+    param([string]$Path, $Snapshot)
+
+    if ($null -eq $Snapshot) {
+        return -not (Test-Path -LiteralPath $Path -PathType Leaf)
+    }
+    $current = Get-StateSnapshot -Path $Path
+    return $null -ne $current -and
+        $current.length -eq $Snapshot.length -and
+        $current.creation_time_utc -eq $Snapshot.creation_time_utc -and
+        $current.last_write_time_utc -eq $Snapshot.last_write_time_utc -and
+        $current.sha256 -ceq $Snapshot.sha256 -and
+        $current.content -ceq $Snapshot.content
+}
+
+function Get-ExistingStateStatus {
+    param($Snapshot)
+
+    if ($null -eq $Snapshot) {
         return "Absent"
     }
     try {
-        $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $state = $Snapshot.content | ConvertFrom-Json
         $expectedKeys = @("pid", "bind_host", "port", "start_time_utc", "bundle_root")
         $actualKeys = @($state.PSObject.Properties.Name | Sort-Object)
         if (($actualKeys -join ",") -ne (($expectedKeys | Sort-Object) -join ",") -or
@@ -164,6 +221,7 @@ function Get-ExistingStateStatus {
 
 $startedProcess = $null
 $resolvedStateFile = $null
+$stateReservation = $null
 $statePublishedByThisInvocation = $false
 try {
     if (-not ($Port -is [int]) -or $Port -lt 1 -or $Port -gt 65535) {
@@ -176,7 +234,7 @@ try {
         throw "MaxConcurrentAudio must be a positive integer."
     }
 
-    Assert-BindHost -HostValue $BindHost
+    $canonicalBindHost = Get-CanonicalBindHost -HostValue $BindHost
     Assert-AudioConfiguration -ProxyUrl $AudioProxyUrl -AllowedHosts $AudioAllowedHost
     $resolvedBundleRoot = Resolve-BundleRoot -Path $BundleRoot
     $currentPath = Join-Path $resolvedBundleRoot "current.json"
@@ -194,13 +252,18 @@ try {
         throw "StateFile must include a directory."
     }
     New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
-    $existingStateStatus = Get-ExistingStateStatus -Path $resolvedStateFile
+    $stateReservation = Acquire-StateReservation -StatePath $resolvedStateFile
+    $existingStateSnapshot = Get-StateSnapshot -Path $resolvedStateFile
+    $existingStateStatus = Get-ExistingStateStatus -Snapshot $existingStateSnapshot
     if ($existingStateStatus -eq "LiveOwned") {
         throw "A live owned service state already exists. Refusing to overwrite it."
     }
     if ($existingStateStatus -eq "StaleOrInvalid") {
         if (-not $ReplaceStaleState) {
             throw "State file is stale or invalid. Re-run with -ReplaceStaleState after operator review."
+        }
+        if (-not (Test-StateSnapshotUnchanged -Path $resolvedStateFile -Snapshot $existingStateSnapshot)) {
+            throw "State file changed during stale-state review. Refusing to remove it."
         }
         Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
     }
@@ -214,7 +277,7 @@ try {
     $arguments = @(
         "-3.12", "-m", "competition_emotion.service",
         "--bundle-root", $resolvedBundleRoot,
-        "--host", $BindHost,
+        "--host", $canonicalBindHost,
         "--port", $Port,
         "--audio-budget-seconds", $AudioBudgetSeconds,
         "--max-concurrent-audio", $MaxConcurrentAudio
@@ -245,7 +308,7 @@ try {
 
     $state = [ordered]@{
         pid = $startedProcess.Id
-        bind_host = $BindHost
+        bind_host = $canonicalBindHost
         port = $Port
         start_time_utc = $processCreationTimeUtc
         bundle_root = $resolvedBundleRoot
@@ -259,7 +322,7 @@ try {
     finally {
         Remove-Item -LiteralPath $temporaryStatePath -Force -ErrorAction SilentlyContinue
     }
-    Write-Host "Service started: PID $($startedProcess.Id), $BindHost`:$Port"
+    Write-Host "Service started: PID $($startedProcess.Id), $canonicalBindHost`:$Port"
     Write-Host "State file: $resolvedStateFile"
     Write-Host "Logs: $logDirectory"
 }
@@ -271,4 +334,9 @@ catch {
         Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction SilentlyContinue
     }
     throw
+}
+finally {
+    if ($null -ne $stateReservation) {
+        $stateReservation.Dispose()
+    }
 }

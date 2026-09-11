@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +69,46 @@ if ($hosts.Count -ne 1 -or $hosts[0] -cne "10.20.30.40" -or $ports.Count -ne 1 -
         result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", command], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise the launcher reservation")
+    def test_powershell_launcher_reservation_is_exclusive_and_canonicalizes_zero(self) -> None:
+        script_path = SCRIPTS / "start_service.ps1"
+        restart_script_path = SCRIPTS / "restart_service.ps1"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "service-state.json"
+            command = f'''$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile({str(script_path)!r}, [ref]$tokens, [ref]$errors)
+if ($errors.Count) {{ exit 2 }}
+foreach ($name in @("Acquire-StateReservation", "Get-CanonicalBindHost")) {{
+    $function = $ast.Find({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }}, $true)
+    if ($null -eq $function) {{ exit 3 }}
+    . ([ScriptBlock]::Create($function.Extent.Text))
+}}
+if ((Get-CanonicalBindHost -HostValue "0") -cne "0.0.0.0") {{ exit 4 }}
+$restartTokens = $null
+$restartErrors = $null
+$restartAst = [System.Management.Automation.Language.Parser]::ParseFile({str(restart_script_path)!r}, [ref]$restartTokens, [ref]$restartErrors)
+if ($restartErrors.Count) {{ exit 7 }}
+$restartFunction = $restartAst.Find({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Get-CanonicalBindHost" }}, $true)
+if ($null -eq $restartFunction) {{ exit 8 }}
+. ([ScriptBlock]::Create($restartFunction.Extent.Text))
+if ((Get-CanonicalBindHost -HostValue "0") -cne "0.0.0.0") {{ exit 9 }}
+$reservation = Acquire-StateReservation -StatePath {str(state_file)!r}
+try {{
+    if (-not $reservation.Name.EndsWith(".launch.lock", [System.StringComparison]::Ordinal)) {{ Write-Output $reservation.Name; exit 6 }}
+    try {{
+        $second = [System.IO.File]::Open($reservation.Name, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $second.Dispose()
+        exit 5
+    }}
+    catch [System.IO.IOException] {{ }}
+}}
+finally {{
+    $reservation.Dispose()
+}}'''
+            result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", command], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
     def test_start_script_validates_bundle_and_keeps_proxy_out_of_logs_and_state(self) -> None:
         source = read(SCRIPTS / "start_service.ps1")
 
@@ -85,11 +126,22 @@ if ($hosts.Count -ne 1 -or $hosts[0] -cne "10.20.30.40" -or $ports.Count -ne 1 -
         self.assertIn("Move-Item -LiteralPath $temporaryStatePath -Destination $resolvedStateFile -Force", source)
         self.assertIn("[switch]$ReplaceStaleState", source)
         self.assertIn("Get-ExistingStateStatus", source)
+        self.assertIn("Acquire-StateReservation", source)
+        self.assertIn("Get-StateSnapshot", source)
+        self.assertIn("Test-StateSnapshotUnchanged", source)
+        self.assertIn("FileShare]::None", source)
+        self.assertIn("$stateReservation.Dispose()", source)
+        self.assertLess(source.index("$stateReservation = Acquire-StateReservation"), source.index("$existingStateSnapshot = Get-StateSnapshot"))
+        self.assertLess(source.index("Test-StateSnapshotUnchanged"), source.index("Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop"))
+        self.assertIn('"--host", $canonicalBindHost', source)
+        self.assertIn("bind_host = $canonicalBindHost", source)
         self.assertIn("A live owned service state already exists", source)
         self.assertIn("ReplaceStaleState", source)
         self.assertIn("Get-CimInstance Win32_Process", source)
         self.assertRegex(source, r"\[ordered\]@\{[\s\S]*pid[\s\S]*bind_host[\s\S]*port[\s\S]*start_time_utc[\s\S]*bundle_root")
         self.assertIn("CreationDate", source)
+        self.assertIn("$canonicalBindHost", source)
+        self.assertIn("Get-CanonicalBindHost", source)
         catch_block = source.rsplit("catch {", 1)[1]
         self.assertIn("if ($statePublishedByThisInvocation)", catch_block)
         self.assertNotIn("audio_proxy_url", source.lower())
@@ -108,6 +160,7 @@ if ($hosts.Count -ne 1 -or $hosts[0] -cne "10.20.30.40" -or $ports.Count -ne 1 -
         self.assertIn('Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--host"', source)
         self.assertIn('Get-CommandLineOptionValues -CommandLine $process.CommandLine -Option "--port"', source)
         self.assertIn("process creation time", source)
+        self.assertIn("-BindHost $canonicalBindHost", source)
         self.assertIn("& $startScript", source)
 
     def test_environment_example_keeps_proxy_secret_empty_and_operator_supplied(self) -> None:
