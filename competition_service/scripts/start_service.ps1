@@ -231,6 +231,53 @@ function Test-StateSnapshotUnchanged {
         $current.content -ceq $Snapshot.content
 }
 
+function Get-StaleStateBackupPath {
+    param(
+        [string]$StatePath,
+        [string]$StateDirectory
+    )
+
+    $fileName = [System.IO.Path]::GetFileName($StatePath)
+    do {
+        $candidate = Join-Path $StateDirectory ("." + $fileName + "." + [Guid]::NewGuid().ToString("N") + ".stale")
+    } while (Test-Path -LiteralPath $candidate)
+    return $candidate
+}
+
+function Remove-PublishedStateIfOwned {
+    param(
+        [string]$resolvedStateFile,
+        $PublishedSnapshot
+    )
+
+    try {
+        if ($null -eq $PublishedSnapshot -or
+            -not (Test-StateSnapshotUnchanged -Path $resolvedStateFile -Snapshot $PublishedSnapshot)) {
+            return $false
+        }
+        Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-StaleStateBackupOwned {
+    param(
+        [string]$BackupPath,
+        $BackupSnapshot
+    )
+
+    try {
+        return $null -ne $BackupSnapshot -and
+            (Test-StateSnapshotUnchanged -Path $BackupPath -Snapshot $BackupSnapshot)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-ExistingStateStatus {
     param($Snapshot)
 
@@ -352,94 +399,138 @@ function Start-CompetitionEmotionService {
 
     $startedProcess = $null
     $statePublishedByThisInvocation = $false
+    $publishedStateSnapshot = $null
+    $staleStateBackupPath = $null
+    $staleStateBackupSnapshot = $null
+    $staleStateBackupOwnedByInvocation = $false
+    $resolvedStateFile = $null
     try {
         $resolvedStateFile = $Configuration.resolved_state_file
         $resolvedBundleRoot = $Configuration.resolved_bundle_root
         $canonicalBindHost = $Configuration.canonical_bind_host
         $stateDirectory = $Configuration.state_directory
         $Port = [int]$Configuration.port
-    $existingStateSnapshot = Get-StateSnapshot -Path $resolvedStateFile
-    $existingStateStatus = Get-ExistingStateStatus -Snapshot $existingStateSnapshot
-    if ($existingStateStatus -eq "LiveOwned") {
-        throw "A live owned service state already exists. Refusing to overwrite it."
-    }
-    if ($existingStateStatus -eq "StaleOrInvalid") {
-        if (-not $ReplaceStaleState) {
-            throw "State file is stale or invalid. Re-run with -ReplaceStaleState after operator review."
+        $existingStateSnapshot = Get-StateSnapshot -Path $resolvedStateFile
+        $existingStateStatus = Get-ExistingStateStatus -Snapshot $existingStateSnapshot
+        if ($existingStateStatus -eq "LiveOwned") {
+            throw "A live owned service state already exists. Refusing to overwrite it."
         }
-        if (-not (Test-StateSnapshotUnchanged -Path $resolvedStateFile -Snapshot $existingStateSnapshot)) {
-            throw "State file changed during stale-state review. Refusing to remove it."
+        if ($existingStateStatus -eq "StaleOrInvalid") {
+            if (-not $ReplaceStaleState) {
+                throw "State file is stale or invalid. Re-run with -ReplaceStaleState after operator review."
+            }
+            if (-not (Test-StateSnapshotUnchanged -Path $resolvedStateFile -Snapshot $existingStateSnapshot)) {
+                throw "State file changed during stale-state review. Refusing to remove it."
+            }
+            $staleStateBackupPath = Get-StaleStateBackupPath -StatePath $resolvedStateFile -StateDirectory $stateDirectory
+            Move-Item -LiteralPath $resolvedStateFile -Destination $staleStateBackupPath -ErrorAction Stop
+            $staleStateBackupOwnedByInvocation = $true
+            $staleStateBackupSnapshot = Get-StateSnapshot -Path $staleStateBackupPath
+            if ($null -eq $staleStateBackupSnapshot) {
+                throw "Stale state backup could not be verified before launch."
+            }
         }
-        Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction Stop
-    }
 
-    $logDirectory = Join-Path $resolvedBundleRoot "logs\\service"
-    New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
-    $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
-    $stdoutPath = Join-Path $logDirectory "service-$timestamp.stdout.log"
-    $stderrPath = Join-Path $logDirectory "service-$timestamp.stderr.log"
-    $serviceRoot = Split-Path -Parent $PSScriptRoot
-    $arguments = @(
-        "-3.12", "-m", "competition_emotion.service",
-        "--bundle-root", $resolvedBundleRoot,
-        "--host", $canonicalBindHost,
-        "--port", $Port,
-        "--audio-budget-seconds", $AudioBudgetSeconds,
-        "--max-concurrent-audio", $MaxConcurrentAudio
-    )
-    if ($hasProxy = -not [string]::IsNullOrWhiteSpace($AudioProxyUrl)) {
-        $arguments += "--audio-proxy-url", $AudioProxyUrl
-        foreach ($host in $AudioAllowedHost) {
-            $arguments += "--audio-allowed-host", $host
+        $logDirectory = Join-Path $resolvedBundleRoot "logs\\service"
+        New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+        $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+        $stdoutPath = Join-Path $logDirectory "service-$timestamp.stdout.log"
+        $stderrPath = Join-Path $logDirectory "service-$timestamp.stderr.log"
+        $serviceRoot = Split-Path -Parent $PSScriptRoot
+        $arguments = @(
+            "-3.12", "-m", "competition_emotion.service",
+            "--bundle-root", $resolvedBundleRoot,
+            "--host", $canonicalBindHost,
+            "--port", $Port,
+            "--audio-budget-seconds", $AudioBudgetSeconds,
+            "--max-concurrent-audio", $MaxConcurrentAudio
+        )
+        if ($hasProxy = -not [string]::IsNullOrWhiteSpace($AudioProxyUrl)) {
+            $arguments += "--audio-proxy-url", $AudioProxyUrl
+            foreach ($host in $AudioAllowedHost) {
+                $arguments += "--audio-allowed-host", $host
+            }
         }
-    }
-    if (-not [string]::IsNullOrWhiteSpace($AudioTempRoot)) {
-        $arguments += "--audio-temp-root", ([System.IO.Path]::GetFullPath($AudioTempRoot))
-    }
-    $argumentLine = (@($arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument -Value ([string]$_) }) -join " ")
+        if (-not [string]::IsNullOrWhiteSpace($AudioTempRoot)) {
+            $arguments += "--audio-temp-root", ([System.IO.Path]::GetFullPath($AudioTempRoot))
+        }
+        $argumentLine = (@($arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument -Value ([string]$_) }) -join " ")
 
-    $startedProcess = Start-Process -FilePath "py" -ArgumentList $argumentLine -WorkingDirectory $serviceRoot `
-        -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-    Start-Sleep -Milliseconds 150
-    $verifiedProcess = Get-Process -Id $startedProcess.Id -ErrorAction Stop
-    if ($null -eq $verifiedProcess -or $verifiedProcess.HasExited) {
-        throw "Service process exited before state publication. Inspect the service logs."
-    }
-    $processMetadata = Get-CimInstance Win32_Process -Filter "ProcessId = $startedProcess.Id"
-    $processCreationTimeUtc = Get-NormalizedProcessCreationTime -Process $processMetadata
-    if ([string]::IsNullOrWhiteSpace($processCreationTimeUtc)) {
-        throw "Service process creation time could not be verified before state publication."
-    }
+        $startedProcess = Start-Process -FilePath "py" -ArgumentList $argumentLine -WorkingDirectory $serviceRoot `
+            -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+        Start-Sleep -Milliseconds 150
+        $verifiedProcess = Get-Process -Id $startedProcess.Id -ErrorAction Stop
+        if ($null -eq $verifiedProcess -or $verifiedProcess.HasExited) {
+            throw "Service process exited before state publication. Inspect the service logs."
+        }
+        $processMetadata = Get-CimInstance Win32_Process -Filter "ProcessId = $startedProcess.Id"
+        $processCreationTimeUtc = Get-NormalizedProcessCreationTime -Process $processMetadata
+        if ([string]::IsNullOrWhiteSpace($processCreationTimeUtc)) {
+            throw "Service process creation time could not be verified before state publication."
+        }
 
-    $state = [ordered]@{
-        pid = $startedProcess.Id
-        bind_host = $canonicalBindHost
-        port = $Port
-        start_time_utc = $processCreationTimeUtc
-        bundle_root = $resolvedBundleRoot
-    }
-    $temporaryStatePath = Join-Path $stateDirectory ("." + [System.IO.Path]::GetFileName($resolvedStateFile) + "." + [Guid]::NewGuid().ToString("N") + ".tmp")
-    try {
-        [System.IO.File]::WriteAllText($temporaryStatePath, ($state | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
-        Move-Item -LiteralPath $temporaryStatePath -Destination $resolvedStateFile -Force
-        $statePublishedByThisInvocation = $true
-    }
-    finally {
-        Remove-Item -LiteralPath $temporaryStatePath -Force -ErrorAction SilentlyContinue
-    }
-    Write-Host "Service started: PID $($startedProcess.Id), $canonicalBindHost`:$Port"
-    Write-Host "State file: $resolvedStateFile"
-    Write-Host "Logs: $logDirectory"
+        $state = [ordered]@{
+            pid = $startedProcess.Id
+            bind_host = $canonicalBindHost
+            port = $Port
+            start_time_utc = $processCreationTimeUtc
+            bundle_root = $resolvedBundleRoot
+        }
+        $temporaryStatePath = Join-Path $stateDirectory ("." + [System.IO.Path]::GetFileName($resolvedStateFile) + "." + [Guid]::NewGuid().ToString("N") + ".tmp")
+        try {
+            [System.IO.File]::WriteAllText($temporaryStatePath, ($state | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+            if (Test-Path -LiteralPath $resolvedStateFile) {
+                throw "State file appeared during launch. Refusing to overwrite it."
+            }
+            Move-Item -LiteralPath $temporaryStatePath -Destination $resolvedStateFile -Force
+            $statePublishedByThisInvocation = $true
+            $publishedStateSnapshot = Get-StateSnapshot -Path $resolvedStateFile
+            if ($null -eq $publishedStateSnapshot) {
+                throw "Published service state could not be verified."
+            }
+            if ($staleStateBackupOwnedByInvocation) {
+                if (-not (Test-StaleStateBackupOwned -BackupPath $staleStateBackupPath -BackupSnapshot $staleStateBackupSnapshot)) {
+                    throw "Stale state backup changed during launch; retaining it for manual recovery."
+                }
+                Remove-Item -LiteralPath $staleStateBackupPath -Force -ErrorAction Stop
+                $staleStateBackupOwnedByInvocation = $false
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $temporaryStatePath -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "Service started: PID $($startedProcess.Id), $canonicalBindHost`:$Port"
+        Write-Host "State file: $resolvedStateFile"
+        Write-Host "Logs: $logDirectory"
     }
     catch {
-    if ($null -ne $startedProcess) {
-        Stop-Process -InputObject $startedProcess -Force -ErrorAction SilentlyContinue
+        $launchError = $_
+        if ($null -ne $startedProcess) {
+            Stop-Process -InputObject $startedProcess -Force -ErrorAction SilentlyContinue
+        }
+        if ($statePublishedByThisInvocation) {
+            [void](Remove-PublishedStateIfOwned -resolvedStateFile $resolvedStateFile -PublishedSnapshot $publishedStateSnapshot)
+        }
+        if ($staleStateBackupOwnedByInvocation -and
+            (Test-Path -LiteralPath $staleStateBackupPath -PathType Leaf)) {
+            if (-not (Test-StaleStateBackupOwned -BackupPath $staleStateBackupPath -BackupSnapshot $staleStateBackupSnapshot)) {
+                Write-Warning "Stale state backup '$staleStateBackupPath' changed or lost ownership; it was retained for manual recovery."
+            }
+            elseif (-not (Test-Path -LiteralPath $resolvedStateFile)) {
+                try {
+                    Move-Item -LiteralPath $staleStateBackupPath -Destination $resolvedStateFile -ErrorAction Stop
+                    $staleStateBackupOwnedByInvocation = $false
+                }
+                catch [System.Exception] {
+                    Write-Warning "Could not restore stale state backup '$staleStateBackupPath'; it was retained for manual recovery."
+                }
+            }
+            else {
+                Write-Warning "A newer state exists at '$resolvedStateFile'; stale backup '$staleStateBackupPath' was retained for manual recovery."
+            }
+        }
+        throw $launchError
     }
-    if ($statePublishedByThisInvocation) {
-        Remove-Item -LiteralPath $resolvedStateFile -Force -ErrorAction SilentlyContinue
-    }
-    throw
-}
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

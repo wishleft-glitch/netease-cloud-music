@@ -212,6 +212,235 @@ exit 0'''
             )
         self.assertEqual(result.returncode, 0, f"exit={result.returncode}\n" + result.stderr + result.stdout)
 
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise stale-state launch recovery")
+    def test_powershell_launch_failure_restores_the_exact_stale_state(self) -> None:
+        script_path = SCRIPTS / "start_service.ps1"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            bundle_root = temporary_root / "bundle"
+            bundle_root.mkdir()
+            (bundle_root / "current.json").write_text("{}", encoding="utf-8")
+            state_file = temporary_root / "service-state.json"
+            old_state = '{"legacy":"old"}'
+            command = f'''$ErrorActionPreference = "Stop"
+$bundleRoot = {str(bundle_root)!r}
+$stateFile = {str(state_file)!r}
+$stateDirectory = {str(temporary_root)!r}
+$oldState = {old_state!r}
+[System.IO.File]::WriteAllText($stateFile, $oldState, [System.Text.UTF8Encoding]::new($false))
+function global:Start-Process {{
+    [CmdletBinding()]
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+    throw "synthetic launch failure"
+}}
+$failed = $false
+try {{
+    & {str(script_path)!r} -BundleRoot $bundleRoot -BindHost "10.20.30.40" -Port 8000 -StateFile $stateFile -ReplaceStaleState
+}}
+catch {{
+    $failed = $true
+}}
+if (-not $failed) {{ throw "Expected the synthetic launch failure." }}
+if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {{ throw "The stale state path was not restored." }}
+if ([System.IO.File]::ReadAllText($stateFile) -cne $oldState) {{ throw "The restored state content changed." }}
+$backups = @(Get-ChildItem -LiteralPath $stateDirectory -Force | Where-Object {{ $_.Name -like ".service-state.json.*.stale" }})
+if ($backups.Count -ne 0) {{ throw "The stale backup should be consumed after restoration." }}
+exit 0'''
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 0, f"exit={result.returncode}\n" + result.stderr + result.stdout)
+
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise stale-backup ownership recovery")
+    def test_powershell_launch_failure_does_not_restore_a_modified_stale_backup(self) -> None:
+        script_path = SCRIPTS / "start_service.ps1"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            bundle_root = temporary_root / "bundle"
+            bundle_root.mkdir()
+            (bundle_root / "current.json").write_text("{}", encoding="utf-8")
+            state_file = temporary_root / "service-state.json"
+            old_state = '{"legacy":"old"}'
+            modified_state = '{"tampered":"backup"}'
+            command = f'''$ErrorActionPreference = "Stop"
+$bundleRoot = {str(bundle_root)!r}
+$stateFile = {str(state_file)!r}
+$stateDirectory = {str(temporary_root)!r}
+$modifiedState = {modified_state!r}
+[System.IO.File]::WriteAllText($stateFile, {old_state!r}, [System.Text.UTF8Encoding]::new($false))
+function global:Start-Process {{
+    [CmdletBinding()]
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+    $backup = Get-ChildItem -LiteralPath $stateDirectory -Force | Where-Object {{ $_.Name -like ".service-state.json.*.stale" }} | Select-Object -First 1
+    if ($null -eq $backup) {{ throw "Synthetic launch could not find the stale backup." }}
+    [System.IO.File]::WriteAllText($backup.FullName, $modifiedState, [System.Text.UTF8Encoding]::new($false))
+    throw "synthetic launch failure"
+}}
+$failed = $false
+try {{
+    & {str(script_path)!r} -BundleRoot $bundleRoot -BindHost "10.20.30.40" -Port 8000 -StateFile $stateFile -ReplaceStaleState
+}}
+catch {{
+    $failed = $true
+}}
+if (-not $failed) {{ throw "Expected the synthetic launch failure." }}
+if (Test-Path -LiteralPath $stateFile -PathType Leaf) {{ throw "A modified stale backup must not be restored as state." }}
+$backups = @(Get-ChildItem -LiteralPath $stateDirectory -Force | Where-Object {{ $_.Name -like ".service-state.json.*.stale" }})
+if ($backups.Count -ne 1) {{ throw "The modified stale backup was not retained for manual recovery." }}
+if ([System.IO.File]::ReadAllText($backups[0].FullName) -cne $modifiedState) {{ throw "The modified stale backup was changed after ownership was lost." }}
+exit 0'''
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 0, f"exit={result.returncode}\n" + result.stderr + result.stdout)
+
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise stale-state publication recovery")
+    def test_powershell_publication_failure_restores_the_exact_stale_state(self) -> None:
+        script_path = SCRIPTS / "start_service.ps1"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            bundle_root = temporary_root / "bundle"
+            bundle_root.mkdir()
+            (bundle_root / "current.json").write_text("{}", encoding="utf-8")
+            state_file = temporary_root / "service-state.json"
+            old_state = '{"legacy":"old"}'
+            command = f'''$ErrorActionPreference = "Stop"
+$bundleRoot = {str(bundle_root)!r}
+$stateFile = {str(state_file)!r}
+$stateDirectory = {str(temporary_root)!r}
+$oldState = {old_state!r}
+$global:MoveCallCount = 0
+$global:RecoveryBundleRoot = $bundleRoot
+[System.IO.File]::WriteAllText($stateFile, $oldState, [System.Text.UTF8Encoding]::new($false))
+function global:Start-Process {{
+    [CmdletBinding()]
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+    return [pscustomobject]@{{ Id = 434343 }}
+}}
+function global:Get-Process {{
+    [CmdletBinding()]
+    param([int]$Id)
+    if ($Id -eq 434343) {{ return [pscustomobject]@{{ Id = 434343; HasExited = $false }} }}
+    return $null
+}}
+function global:Get-CimInstance {{
+    [CmdletBinding()]
+    param([string]$ClassName, [string]$Filter)
+    return [pscustomobject]@{{
+        CommandLine = 'py -3.12 -m competition_emotion.service --bundle-root "' + $global:RecoveryBundleRoot + '" --host 10.20.30.40 --port 8000'
+        CreationDate = [DateTime]::ParseExact("2030-01-02T03:04:05.0000000Z", "o", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    }}
+}}
+function global:Stop-Process {{
+    [CmdletBinding()]
+    param([int]$Id, $InputObject, [switch]$Force)
+}}
+function global:Move-Item {{
+    [CmdletBinding()]
+    param([string]$LiteralPath, [string]$Destination, [switch]$Force)
+    $global:MoveCallCount += 1
+    if ($global:MoveCallCount -eq 2) {{
+        throw "synthetic publication failure"
+    }}
+    Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters
+}}
+$failed = $false
+try {{
+    & {str(script_path)!r} -BundleRoot $bundleRoot -BindHost "10.20.30.40" -Port 8000 -StateFile $stateFile -ReplaceStaleState
+}}
+catch {{
+    $failed = $true
+}}
+if (-not $failed) {{ throw "Expected the synthetic publication failure." }}
+if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {{ throw "The stale state path was not restored." }}
+if ([System.IO.File]::ReadAllText($stateFile) -cne $oldState) {{ throw "The restored state content changed." }}
+$backups = @(Get-ChildItem -LiteralPath $stateDirectory -Force | Where-Object {{ $_.Name -like ".service-state.json.*.stale" }})
+if ($backups.Count -ne 0) {{ throw "The stale backup should be consumed after restoration." }}
+exit 0'''
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 0, f"exit={result.returncode}\n" + result.stderr + result.stdout)
+
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise stale-state concurrency recovery")
+    def test_powershell_new_state_during_launch_failure_is_preserved_with_backup(self) -> None:
+        script_path = SCRIPTS / "start_service.ps1"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            bundle_root = temporary_root / "bundle"
+            bundle_root.mkdir()
+            (bundle_root / "current.json").write_text("{}", encoding="utf-8")
+            state_file = temporary_root / "service-state.json"
+            old_state = '{"legacy":"old"}'
+            new_state = '{"new":"state"}'
+            command = f'''$ErrorActionPreference = "Stop"
+$bundleRoot = {str(bundle_root)!r}
+$stateFile = {str(state_file)!r}
+$stateDirectory = {str(temporary_root)!r}
+$oldState = {old_state!r}
+$newState = {new_state!r}
+$global:RecoveryStateFile = $stateFile
+$global:RecoveryNewState = $newState
+$global:RecoveryBundleRoot = $bundleRoot
+[System.IO.File]::WriteAllText($stateFile, $oldState, [System.Text.UTF8Encoding]::new($false))
+function global:Start-Process {{
+    [CmdletBinding()]
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+    [System.IO.File]::WriteAllText($global:RecoveryStateFile, $global:RecoveryNewState, [System.Text.UTF8Encoding]::new($false))
+    return [pscustomobject]@{{ Id = 434343 }}
+}}
+function global:Get-Process {{
+    [CmdletBinding()]
+    param([int]$Id)
+    if ($Id -eq 434343) {{ return [pscustomobject]@{{ Id = 434343; HasExited = $false }} }}
+    return $null
+}}
+function global:Get-CimInstance {{
+    [CmdletBinding()]
+    param([string]$ClassName, [string]$Filter)
+    return [pscustomobject]@{{
+        CommandLine = 'py -3.12 -m competition_emotion.service --bundle-root "' + $global:RecoveryBundleRoot + '" --host 10.20.30.40 --port 8000'
+        CreationDate = [DateTime]::ParseExact("2030-01-02T03:04:05.0000000Z", "o", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    }}
+}}
+function global:Stop-Process {{
+    [CmdletBinding()]
+    param([int]$Id, $InputObject, [switch]$Force)
+}}
+$failed = $false
+try {{
+    & {str(script_path)!r} -BundleRoot $bundleRoot -BindHost "10.20.30.40" -Port 8000 -StateFile $stateFile -ReplaceStaleState
+}}
+catch {{
+    $failed = $true
+}}
+if (-not $failed) {{ throw "Expected the newer-state guard failure." }}
+if ([System.IO.File]::ReadAllText($stateFile) -cne $newState) {{ throw "The newer state was overwritten." }}
+$backups = @(Get-ChildItem -LiteralPath $stateDirectory -Force | Where-Object {{ $_.Name -like ".service-state.json.*.stale" }})
+if ($backups.Count -ne 1) {{ throw "The stale backup was not retained for explicit recovery." }}
+if ([System.IO.File]::ReadAllText($backups[0].FullName) -cne $oldState) {{ throw "The retained stale backup content changed." }}
+exit 0'''
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 0, f"exit={result.returncode}\n" + result.stderr + result.stdout)
+
     def test_start_script_validates_bundle_and_keeps_proxy_out_of_logs_and_state(self) -> None:
         source = read(SCRIPTS / "start_service.ps1")
 
