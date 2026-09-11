@@ -470,9 +470,13 @@ def create_app(
             labels=frozenset(),
             name=request.song_name,
             artists=request.artists or "",
+            # The official request has no separate genre field.  Keep the
+            # established auxiliary-metadata channel populated with the
+            # optional album value so the trained artifact remains usable.
             genre=request.album_name or "",
             text=lyric_text,
             audio_url=request.audio_url,
+            album_name=request.album_name or "",
         )
         scores = await asyncio.to_thread(
             runtime.scorer.score, runtime.scorer.compose_text(song)

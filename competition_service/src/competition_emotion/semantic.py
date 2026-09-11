@@ -94,7 +94,7 @@ def review_candidates(
         "song_id": song.song_id,
         "song_name": song.name,
         "artists": song.artists,
-        "album_name": song.genre,
+        "album_name": song.album_name,
         "lyrics": lyric_text,
         "candidates": list(candidate_list),
         "rubric": rubric.context(candidate_list) if rubric is not None else [],

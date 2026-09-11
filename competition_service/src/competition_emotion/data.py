@@ -116,6 +116,7 @@ def load_official_songs(path: Path) -> list[Song]:
                 genre=existing.genre,
                 text=existing.text,
                 audio_url=existing.audio_url,
+                album_name=existing.album_name,
             )
             continue
 
@@ -132,6 +133,7 @@ def load_official_songs(path: Path) -> list[Song]:
             genre=_clean_string(row["一级曲风标签"]),
             text=_song_text((name, artists, lyrics)),
             audio_url=_clean_string(row["音频下载地址"]),
+            album_name=_clean_string(row.get("专辑名称", "")),
         )
 
     return sorted(songs_by_id.values(), key=lambda song: _song_sort_key(song.song_id))

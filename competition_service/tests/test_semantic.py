@@ -13,7 +13,7 @@ from competition_emotion.types import Song
 
 class SemanticReviewTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.song = Song("1", frozenset(), "歌名", "艺人", "流行", "歌词", "")
+        self.song = Song("1", frozenset(), "歌名", "艺人", "流行", "歌词", "", "专辑")
         self.config = SemanticReviewConfig("http://reviewer.internal/review")
 
     def test_config_rejects_credentials_and_bad_threshold(self) -> None:
@@ -49,6 +49,7 @@ class SemanticReviewTests(unittest.TestCase):
         self.assertEqual((result.label, result.confidence), ("孤独", 0.91))
         payload = client.post.call_args.kwargs["json"]
         self.assertEqual(payload["song_id"], "1")
+        self.assertEqual(payload["album_name"], "专辑")
         self.assertEqual(payload["candidates"], ["孤独", "思念"])
         self.assertEqual([item["label"] for item in payload["rubric"]], ["孤独", "思念"])
         self.assertTrue(payload["rubric"][0]["rule_ids"])

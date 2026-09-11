@@ -10,6 +10,7 @@ class Song:
     genre: str
     text: str
     audio_url: str
+    album_name: str = ""
 
 
 @dataclass(frozen=True)

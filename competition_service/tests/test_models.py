@@ -89,11 +89,13 @@ class TextScorerTests(unittest.TestCase):
             "流行",
             "夏日狂欢 歌手 真正歌词",
             loaded.audio_url,
+            "夏日专辑",
         )
         model_text = compose_model_text(loaded)
         self.assertEqual(model_text.count("夏日狂欢"), 5)
         self.assertEqual(model_text.count("歌手"), 5)
         self.assertEqual(model_text.count("流行"), 5)
+        self.assertNotIn("夏日专辑", model_text)
         self.assertTrue(model_text.endswith("真正歌词"))
 
     def test_score_preserves_label_order_and_probability_bounds(self) -> None:
