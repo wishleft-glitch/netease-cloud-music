@@ -16,6 +16,7 @@
 /competition/runs/
 /competition/audio_cache/
 /competition/research_cache/
+/competition/research_env/
 /competition/research_gpu_env/
 /competition_service/build/
 *.log

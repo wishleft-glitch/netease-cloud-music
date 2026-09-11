@@ -565,6 +565,9 @@ def create_app(
             audio_state=audio_result.state if audio_config is not None else None,
             metadata_used=metadata_used,
             metadata_fields=metadata_fields,
+            lyric_text=lyric_text,
+            label=top_emotion,
+            rubric=rubric,
         )
         if review_evidence is not None:
             review_parts = [review_evidence]
