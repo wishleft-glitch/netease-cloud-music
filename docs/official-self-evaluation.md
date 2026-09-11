@@ -36,7 +36,7 @@ percentage as an evaluation result.
 
 ## Latest formal run
 
-Measured from the formal run on 2026-09-11:
+Measured from the formal run on 2026-09-12:
 
 - Current report resolver: `F:\netease\_music\competition\runs\official-20260910\current.json` → `active_bundle` → `<BundleRoot>\<active_bundle>\report.json`
 - The active bundle is resolved from `current.json`; the immutable bundle ID may change on each accepted retraining run.
