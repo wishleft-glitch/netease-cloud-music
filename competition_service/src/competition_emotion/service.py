@@ -387,7 +387,7 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
         raise ValueError("bundle report labels do not match the model")
     report_input_mode = report.get("model_input_mode")
     if report_input_mode is not None:
-        if report_input_mode not in {"legacy", "metadata_v1"} or report_input_mode != scorer.input_mode:
+        if report_input_mode not in {"legacy", "metadata_v1", "metadata_v2"} or report_input_mode != scorer.input_mode:
             raise ValueError("bundle report input mode does not match the model")
     report_score_mode = report.get("score_mode")
     if report_score_mode is not None:
@@ -470,10 +470,7 @@ def create_app(
             labels=frozenset(),
             name=request.song_name,
             artists=request.artists or "",
-            # The official request has no separate genre field.  Keep the
-            # established auxiliary-metadata channel populated with the
-            # optional album value so the trained artifact remains usable.
-            genre=request.album_name or "",
+            genre="",
             text=lyric_text,
             audio_url=request.audio_url,
             album_name=request.album_name or "",
@@ -551,7 +548,7 @@ def create_app(
                 except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError):
                     audio_result = RequestAudioResult("unavailable")
         metadata_fields: tuple[str, ...] = ()
-        metadata_used = runtime.scorer.input_mode == "metadata_v1"
+        metadata_used = runtime.scorer.input_mode in {"metadata_v1", "metadata_v2"}
         if metadata_used:
             fields = ["歌曲名称"]
             if request.artists and request.artists.strip():

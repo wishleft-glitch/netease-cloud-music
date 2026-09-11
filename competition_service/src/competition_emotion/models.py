@@ -28,7 +28,7 @@ _TEXT_CLASS_WEIGHT = None
 _ARTIST_OVERRIDE_MIN_SONGS = 2
 _ARTIST_OVERRIDE_MIN_AGREEMENT = 0.8
 _SCORE_MODES = frozenset({"probability", "softmax"})
-_INPUT_MODES = frozenset({"legacy", "metadata_v1"})
+_INPUT_MODES = frozenset({"legacy", "metadata_v1", "metadata_v2"})
 
 
 def _validate_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
@@ -51,8 +51,10 @@ def _text_or_sentinel(value: object) -> str:
 def _metadata_song_text(song: Song) -> str:
     """Compose the model input with metadata repeated for a strong prior.
 
-    The official workbook stores title and artist at the front of ``text``.
-    Strip that duplicated prefix before adding the metadata block so a song
+    The official request supplies title, artist, album and lyrics, but no
+    first-level genre.  Keep the model representation on those same fields.
+    The official workbook stores title and artist at the front of ``text``;
+    strip that duplicated prefix before adding the metadata block so a song
     does not get an accidental tenfold title weight.
     """
     raw_text = _text_or_sentinel(song.text)
@@ -67,7 +69,7 @@ def _metadata_song_text(song: Song) -> str:
             lyric = raw_text[len(prefix) :].strip()
     metadata = " ".join(
         part.strip()
-        for part in (song.name, song.artists, song.genre)
+        for part in (song.name, song.artists, song.album_name)
         if str(part).strip()
     )
     composed = " ".join(
@@ -168,13 +170,13 @@ class TextScorer:
         self.vectorizer = vectorizer
         self.classifier = classifier
         self.score_mode = "softmax"
-        self.input_mode = "metadata_v1"
+        self.input_mode = "metadata_v2"
         self.artist_overrides = artist_overrides
         return self
 
     def compose_text(self, song: Song) -> str:
         """Compose a request using the representation this artifact was trained on."""
-        if self.input_mode == "metadata_v1":
+        if self.input_mode in {"metadata_v1", "metadata_v2"}:
             return _metadata_song_text(song)
         if self.input_mode == "legacy":
             return _legacy_song_text(song)

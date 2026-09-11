@@ -16,5 +16,5 @@ LABELS = (
     "抑郁",
 )
 LABEL_SET = frozenset(LABELS)
-MODEL_VERSION = "metadata-svc-v4"
+MODEL_VERSION = "metadata-svc-v5"
 MAX_AUDIO_SECONDS = 45
