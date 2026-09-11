@@ -23,6 +23,7 @@ _SCHEMA_VERSION = 2
 _EMPTY_TEXT_SENTINEL = "[no_text]"
 _MODEL_METADATA_REPEATS = 5
 _SCORE_MODES = frozenset({"probability", "softmax"})
+_INPUT_MODES = frozenset({"legacy", "metadata_v1"})
 
 
 def _validate_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
@@ -42,7 +43,7 @@ def _text_or_sentinel(value: object) -> str:
     return text or _EMPTY_TEXT_SENTINEL
 
 
-def _song_text(song: Song) -> str:
+def _metadata_song_text(song: Song) -> str:
     """Compose the model input with metadata repeated for a strong prior.
 
     The official workbook stores title and artist at the front of ``text``.
@@ -72,7 +73,12 @@ def _song_text(song: Song) -> str:
 
 def compose_model_text(song: Song) -> str:
     """Return the exact text representation used by training and inference."""
-    return _song_text(song)
+    return _metadata_song_text(song)
+
+
+def _legacy_song_text(song: Song) -> str:
+    text = _text_or_sentinel(song.text)
+    return text if text != _EMPTY_TEXT_SENTINEL else _text_or_sentinel(song.name)
 
 
 def _label_order_sha256(labels: tuple[str, ...]) -> str:
@@ -88,6 +94,7 @@ class TextScorer:
     vectorizer: TfidfVectorizer | None = None
     classifier: OneVsRestClassifier | None = None
     score_mode: str = "probability"
+    input_mode: str = "legacy"
 
     def fit(self, songs: list[Song], labels: tuple[str, ...]) -> TextScorer:
         configured_labels = _validate_labels(labels)
@@ -127,7 +134,7 @@ class TextScorer:
             max_features=150000,
             sublinear_tf=True,
         )
-        features = vectorizer.fit_transform([_song_text(song) for song in songs])
+        features = vectorizer.fit_transform([_metadata_song_text(song) for song in songs])
         classifier = OneVsRestClassifier(
             LinearSVC(C=0.3, class_weight="balanced")
         )
@@ -137,7 +144,16 @@ class TextScorer:
         self.vectorizer = vectorizer
         self.classifier = classifier
         self.score_mode = "softmax"
+        self.input_mode = "metadata_v1"
         return self
+
+    def compose_text(self, song: Song) -> str:
+        """Compose a request using the representation this artifact was trained on."""
+        if self.input_mode == "metadata_v1":
+            return _metadata_song_text(song)
+        if self.input_mode == "legacy":
+            return _legacy_song_text(song)
+        raise ValueError("unsupported input mode")
 
     def score(self, text: str) -> dict[str, float]:
         probabilities = self.score_many([text])
@@ -165,6 +181,8 @@ class TextScorer:
             probe = self.vectorizer.transform([_EMPTY_TEXT_SENTINEL])
             if self.score_mode not in _SCORE_MODES:
                 raise ValueError("unsupported score mode")
+            if self.input_mode not in _INPUT_MODES:
+                raise ValueError("unsupported input mode")
             self._classifier_scores(self.classifier, probe, 1)
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError("TextScorer has not been fitted") from error
@@ -317,6 +335,7 @@ def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
             "vectorizer": vectorizer,
             "classifier": classifier,
             "score_mode": scorer.score_mode,
+            "input_mode": scorer.input_mode,
         },
         Path(path),
     )
@@ -378,11 +397,15 @@ def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextSc
     score_mode = record.get("score_mode", "probability")
     if not isinstance(score_mode, str) or score_mode not in _SCORE_MODES:
         raise ValueError("text scorer payload has invalid score mode")
+    input_mode = record.get("input_mode", "legacy")
+    if not isinstance(input_mode, str) or input_mode not in _INPUT_MODES:
+        raise ValueError("text scorer payload has invalid input mode")
     scorer = TextScorer(
         labels=labels,
         vectorizer=vectorizer,
         classifier=classifier,
         score_mode=score_mode,
+        input_mode=input_mode,
     )
     try:
         scorer._fitted_components()

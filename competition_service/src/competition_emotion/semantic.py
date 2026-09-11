@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 import math
 from typing import Any, Sequence
 from urllib.parse import urlsplit
@@ -18,7 +19,7 @@ class SemanticReviewConfig:
 
     url: str
     timeout_seconds: float = 3.0
-    min_score_gap: float = 0.08
+    min_score_gap: float = 0.10
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.url)
@@ -26,6 +27,18 @@ class SemanticReviewConfig:
             raise ValueError("semantic review URL must be an http or https URL")
         if parsed.username or parsed.password:
             raise ValueError("semantic review URL must not contain credentials")
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if not hostname:
+            raise ValueError("semantic review URL must include a host")
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            address = None
+        if address is not None:
+            if address.is_global:
+                raise ValueError("semantic review URL must target an internal host")
+        elif "." in hostname and not hostname.endswith((".internal", ".local", ".corp")):
+            raise ValueError("semantic review URL must target an internal host")
         if (
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))

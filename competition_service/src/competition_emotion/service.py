@@ -27,7 +27,7 @@ import uvicorn
 import httpx
 import numpy as np
 
-from .models import TextScorer, compose_model_text, load_text_scorer
+from .models import TextScorer, load_text_scorer
 from .constants import LABELS
 from .evidence import build_evidence
 from .lyrics import compose_lyrics
@@ -374,6 +374,14 @@ def _load_runtime(bundle_root: Path) -> _Runtime:
         raise ValueError("bundle model labels do not match official labels")
     if tuple(report_labels) != scorer.labels:
         raise ValueError("bundle report labels do not match the model")
+    report_input_mode = report.get("model_input_mode")
+    if report_input_mode is not None:
+        if report_input_mode not in {"legacy", "metadata_v1"} or report_input_mode != scorer.input_mode:
+            raise ValueError("bundle report input mode does not match the model")
+    report_score_mode = report.get("score_mode")
+    if report_score_mode is not None:
+        if report_score_mode not in {"probability", "softmax"} or report_score_mode != scorer.score_mode:
+            raise ValueError("bundle report score mode does not match the model")
     return _Runtime(scorer=scorer, model_type=MODEL_TYPE, model_version=model_version)
 
 
@@ -445,7 +453,7 @@ def create_app(
             audio_url=request.audio_url,
         )
         scores = await asyncio.to_thread(
-            runtime.scorer.score, compose_model_text(song)
+            runtime.scorer.score, runtime.scorer.compose_text(song)
         )
         if not isinstance(scores, dict) or set(scores) != set(runtime.scorer.labels):
             raise RuntimeError("model returned invalid scores")
@@ -481,7 +489,7 @@ def create_app(
                 other = [item for item in ranked if item[0] != reviewed.label]
                 if other:
                     other.sort(key=lambda item: item[1], reverse=True)
-                    selected_confidence = max(float(reviewed.confidence), other[0][1])
+                    selected_confidence = float(reviewed.confidence)
                     ranked = [
                         (reviewed.label, selected_confidence),
                         (other[0][0], min(other[0][1], selected_confidence)),
@@ -511,11 +519,21 @@ def create_app(
                     audio_result = await asyncio.shield(audio_task)
                 except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError):
                     audio_result = RequestAudioResult("unavailable")
+        metadata_fields: tuple[str, ...] = ()
+        metadata_used = runtime.scorer.input_mode == "metadata_v1"
+        if metadata_used:
+            fields = ["歌曲名称"]
+            if request.artists and request.artists.strip():
+                fields.append("艺人")
+            if request.album_name and request.album_name.strip():
+                fields.append("专辑/风格元数据")
+            metadata_fields = tuple(fields)
         evidence = build_evidence(
             lyric_used=lyric_used,
             title_used=not lyric_used,
             audio_state=audio_result.state if audio_config is not None else None,
-            metadata_used=True,
+            metadata_used=metadata_used,
+            metadata_fields=metadata_fields,
         )
         if review_evidence is not None:
             evidence = f"{evidence} 语义复核选择候选“{top_emotion}”：{review_evidence}"[:500]
@@ -582,7 +600,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         semantic_gap = (
             arguments.semantic_reranker_min_gap
             if arguments.semantic_reranker_min_gap is not None
-            else float(os.environ.get("SEMANTIC_RERANKER_MIN_GAP", "0.08"))
+            else float(os.environ.get("SEMANTIC_RERANKER_MIN_GAP", "0.10"))
         )
     except ValueError:
         parser.error("semantic reviewer environment values must be numeric")

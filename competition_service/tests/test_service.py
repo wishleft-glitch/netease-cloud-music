@@ -134,7 +134,7 @@ class ServiceTests(unittest.TestCase):
                     "top_confidence": 0.1235,
                     "second_emotion": "孤独",
                     "second_confidence": 0.1235,
-                    "evidence": "基于歌曲名称、艺人、专辑/风格元数据与可用歌词进行情绪判定。",
+                    "evidence": "基于歌曲名称、艺人与可用歌词进行情绪判定。",
                     "cost_ms": response.json()["data"]["cost_ms"],
                 },
                 "error": "",
@@ -376,6 +376,8 @@ class ServiceTests(unittest.TestCase):
         data = response.json()["data"]
         self.assertEqual(data["top_emotion"], "悲伤")
         self.assertEqual(data["second_emotion"], "孤独")
+        self.assertEqual(data["top_confidence"], 0.91)
+        self.assertLessEqual(data["second_confidence"], data["top_confidence"])
         self.assertIn("语义复核选择候选", data["evidence"])
         candidates = review.call_args.args[2]
         self.assertEqual(candidates, ["孤独", "思念", "悲伤"])
@@ -395,8 +397,9 @@ class ServiceTests(unittest.TestCase):
             compose_model_text(Song("abc", frozenset(), "新歌", "", "", "", ""))
         )
         evidence = response.json()["data"]["evidence"]
-        self.assertEqual(evidence, "基于歌曲名称、艺人、专辑/风格元数据进行情绪判定。")
-        self.assertIn("艺人", evidence)
+        self.assertEqual(evidence, "基于歌曲名称进行情绪判定。")
+        self.assertNotIn("艺人", evidence)
+        self.assertNotIn("专辑", evidence)
 
     def test_lyrical_request_evidence_excludes_song_name_and_artist(self) -> None:
         with patch.object(self.app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)) as score:
@@ -409,9 +412,10 @@ class ServiceTests(unittest.TestCase):
             compose_model_text(Song("abc", frozenset(), "新歌", "歌手", "", "任意歌词", ""))
         )
         evidence = response.json()["data"]["evidence"]
-        self.assertEqual(evidence, "基于歌曲名称、艺人、专辑/风格元数据与可用歌词进行情绪判定。")
+        self.assertEqual(evidence, "基于歌曲名称、艺人与可用歌词进行情绪判定。")
         self.assertIn("歌曲名称", evidence)
         self.assertIn("艺人", evidence)
+        self.assertNotIn("专辑", evidence)
 
     def test_request_validation_has_official_400_envelope(self) -> None:
         malformed = (

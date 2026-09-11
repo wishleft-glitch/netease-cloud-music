@@ -4,8 +4,10 @@ from __future__ import annotations
 
 _LYRIC_EVIDENCE = "基于可用歌词文本进行情绪判定。"
 _TITLE_EVIDENCE = "仅基于歌曲名称进行情绪判定。"
-_LYRIC_METADATA_EVIDENCE = "基于歌曲名称、艺人、专辑/风格元数据与可用歌词进行情绪判定。"
-_TITLE_METADATA_EVIDENCE = "基于歌曲名称、艺人、专辑/风格元数据进行情绪判定。"
+def _metadata_phrase(metadata_fields: tuple[str, ...] | None) -> str:
+    fields = metadata_fields or ("歌曲名称", "艺人", "专辑/风格元数据")
+    cleaned = tuple(dict.fromkeys(field.strip() for field in fields if field.strip()))
+    return "、".join(cleaned)
 
 
 def build_evidence(
@@ -14,12 +16,21 @@ def build_evidence(
     title_used: bool,
     audio_state: str | None = None,
     metadata_used: bool = False,
+    metadata_fields: tuple[str, ...] | None = None,
 ) -> str:
     """Describe the input facts without claiming audio changed the label."""
     if lyric_used and not title_used:
-        base = _LYRIC_METADATA_EVIDENCE if metadata_used else _LYRIC_EVIDENCE
+        base = (
+            f"基于{_metadata_phrase(metadata_fields)}与可用歌词进行情绪判定。"
+            if metadata_used
+            else _LYRIC_EVIDENCE
+        )
     elif title_used and not lyric_used:
-        base = _TITLE_METADATA_EVIDENCE if metadata_used else _TITLE_EVIDENCE
+        base = (
+            f"基于{_metadata_phrase(metadata_fields)}进行情绪判定。"
+            if metadata_used
+            else _TITLE_EVIDENCE
+        )
     else:
         raise ValueError("evidence requires exactly one scored input")
     if audio_state is None:

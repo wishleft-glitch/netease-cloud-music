@@ -1,11 +1,11 @@
 # Official service cost estimate
 
-This is a planning formula, not a measured production cost or performance claim. The current observed artifact on 2026-09-11 is the active `versions/9a287f66ef8947ab9117900b187c5130/model.joblib` under the official bundle pointer: 23,646,645 bytes (about 22.6 MiB). Its report declares model type `lyrics_tfidf_logreg`, model version `metadata-svc-v2`, and report schema version 2.
+This is a planning formula, not a measured production cost or performance claim. The current observed artifact on 2026-09-11 is the active `versions/23622c1a9d1b43c99b8d1d5bf202f9cf/model.joblib` under the official bundle pointer: 23,646,672 bytes (about 22.6 MiB). Its report declares model type `lyrics_tfidf_logreg`, model version `metadata-svc-v2`, and report schema version 2.
 
 | Cost component | Formula per recognition request | Current input/status |
 | --- | --- | --- |
 | CPU | CPU core seconds × internal rate | Measure CPU core seconds in the target host; internal rate is finance-owned. |
-| Model storage | 23,646,645 bytes / bytes-per-GiB × storage rate × retention fraction | Current observed model artifact size; storage rate is environment-specific. |
+| Model storage | 23,646,672 bytes / bytes-per-GiB × storage rate × retention fraction | Current observed model artifact size; storage rate is environment-specific. |
 | Audio transfer/decode | downloaded GiB × network rate + CPU core seconds × internal rate | Optional; record only when audio measurement is enabled. |
 | External LLM tokens | input tokens × input-token rate + output tokens × output-token rate | not enabled / 0 |
 | Total | sum of the rows above | Unknown until measured in the target environment. |

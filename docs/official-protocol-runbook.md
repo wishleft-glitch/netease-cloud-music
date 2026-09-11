@@ -55,9 +55,9 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `AudioTempRoot` | Disposable audio workspace | Use a writable local volume with a cleanup policy. |
 | `AudioBudgetSeconds` | Per-request audio budget | Greater than 0 and no more than 25; default 20. |
 | `MaxConcurrentAudio` | Non-queuing audio capacity | Positive integer; tune using saturation data. |
-| `EMOTION_SEMANTIC_RERANKER_URL` | Optional internal candidate reviewer | Set only to an approved internal HTTP(S) endpoint; leave empty to disable. |
+| `EMOTION_SEMANTIC_RERANKER_URL` | Optional internal candidate reviewer | Set only to an approved internal HTTP(S) endpoint (`.internal`, `.local`, `.corp`, or private IP); leave empty to disable. |
 | `--semantic-reranker-timeout-seconds` | Reviewer timeout | 0.1–10 seconds; keep below the overall 25-second request budget. |
-| `--semantic-reranker-min-gap` | Local score gap below which review runs | 0–1; calibrate on a separate validation set. |
+| `--semantic-reranker-min-gap` | Local score gap below which review runs | Default 0.10; calibrate on a separate validation set. |
 
 Restart with the same explicit nonsecret settings. The restart script canonicalizes its IP literal before comparison, then refuses to stop a PID unless the process command line identifies `competition_emotion.service`, has exactly one matching bundle root, canonical host, and port argument, and its Windows process creation time matches the recorded start time. It holds the same OS-level state reservation used by start from the state check through process stop, state removal, and publication of the replacement state, so a concurrent stale-state start waits for the completed restart.
 

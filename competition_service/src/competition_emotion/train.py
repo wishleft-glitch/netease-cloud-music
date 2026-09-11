@@ -222,6 +222,8 @@ def train_text_baseline(
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "model_type": MODEL_TYPE,
         "model_version": MODEL_VERSION,
+        "model_input_mode": scorer.input_mode,
+        "score_mode": scorer.score_mode,
         "source": source,
         "labels": list(configured_labels),
         "seed": seed,

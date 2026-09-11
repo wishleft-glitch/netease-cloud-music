@@ -172,6 +172,27 @@ class TextScorerTests(unittest.TestCase):
                 list(expected.values()),
             )
 
+    def test_legacy_payload_keeps_legacy_request_text(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-text-scorer.joblib"
+            save_text_scorer(self.scorer, path)
+            payload = joblib.load(path)
+            payload.pop("input_mode")
+            joblib.dump(payload, path)
+
+            loaded = load_text_scorer(path, trusted=True)
+            request_song = Song(
+                "legacy",
+                frozenset(),
+                "标题",
+                "艺人",
+                "流行",
+                "真正歌词",
+                "",
+            )
+            self.assertEqual(loaded.input_mode, "legacy")
+            self.assertEqual(loaded.compose_text(request_song), "真正歌词")
+
     def test_load_requires_explicit_trust_before_deserializing(self) -> None:
         with patch("competition_emotion.models.joblib.load") as mocked_load:
             with self.assertRaisesRegex(ValueError, "joblib artifacts must be trusted"):
