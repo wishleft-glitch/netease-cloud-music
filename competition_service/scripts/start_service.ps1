@@ -102,10 +102,69 @@ function Get-NormalizedProcessCreationTime {
         return $null
     }
     try {
-        return ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o")
+        return ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
     }
     catch {
         return $null
+    }
+}
+
+function Get-CanonicalStateStartTimeUtc {
+    param([string]$Content, $Value)
+
+    $matches = @([regex]::Matches(
+        $Content,
+        '"start_time_utc"\s*:\s*"(?<timestamp>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{7}Z)"'
+    ))
+    if ($matches.Count -ne 1) {
+        throw "Invalid state schema. Refusing to use service state."
+    }
+    $rawTimestamp = $matches[0].Groups["timestamp"].Value
+    $parsedTimestamp = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact(
+        $rawTimestamp,
+        "o",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsedTimestamp
+    ) -or $parsedTimestamp.Kind -ne [DateTimeKind]::Utc) {
+        throw "Invalid state schema. Refusing to use service state."
+    }
+    $canonicalTimestamp = $parsedTimestamp.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    if ($rawTimestamp -cne $canonicalTimestamp) {
+        throw "Invalid state schema. Refusing to use service state."
+    }
+    if ($Value -is [DateTime]) {
+        if ($Value.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture) -cne $canonicalTimestamp) {
+            throw "Invalid state schema. Refusing to use service state."
+        }
+        return $canonicalTimestamp
+    }
+    if ($Value -is [string] -and $Value -ceq $canonicalTimestamp) {
+        return $canonicalTimestamp
+    }
+    throw "Invalid state schema. Refusing to use service state."
+}
+
+function ConvertFrom-ServiceStateJson {
+    param([string]$Content)
+
+    try {
+        $convertFromJson = Get-Command ConvertFrom-Json -ErrorAction Stop
+        if ($convertFromJson.Parameters.ContainsKey("DateKind")) {
+            $state = $Content | ConvertFrom-Json -DateKind String
+        }
+        else {
+            $state = $Content | ConvertFrom-Json
+        }
+        if ($null -eq $state) {
+            throw "State content is empty."
+        }
+        $state.start_time_utc = Get-CanonicalStateStartTimeUtc -Content $Content -Value $state.start_time_utc
+        return $state
+    }
+    catch {
+        throw "Invalid state schema. Refusing to use service state."
     }
 }
 
@@ -179,22 +238,15 @@ function Get-ExistingStateStatus {
         return "Absent"
     }
     try {
-        $state = $Snapshot.content | ConvertFrom-Json
+        $state = ConvertFrom-ServiceStateJson -Content $Snapshot.content
         $expectedKeys = @("pid", "bind_host", "port", "start_time_utc", "bundle_root")
         $actualKeys = @($state.PSObject.Properties.Name | Sort-Object)
         if (($actualKeys -join ",") -ne (($expectedKeys | Sort-Object) -join ",") -or
-            $state.pid -isnot [long] -or $state.port -isnot [long] -or
+            (($state.pid -isnot [int]) -and ($state.pid -isnot [long])) -or
+            (($state.port -isnot [int]) -and ($state.port -isnot [long])) -or
             $state.bind_host -isnot [string] -or $state.bundle_root -isnot [string] -or
             $state.start_time_utc -isnot [string] -or $state.pid -lt 1 -or
             $state.port -lt 1 -or $state.port -gt 65535) {
-            return "StaleOrInvalid"
-        }
-        $normalizedStateTime = ([DateTime]::Parse(
-            $state.start_time_utc,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::RoundtripKind
-        )).ToUniversalTime().ToString("o")
-        if ($normalizedStateTime -cne $state.start_time_utc) {
             return "StaleOrInvalid"
         }
         $stateRoot = (Resolve-Path -LiteralPath $state.bundle_root).Path

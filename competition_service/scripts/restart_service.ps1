@@ -35,7 +35,7 @@ function Get-NormalizedProcessCreationTime {
         return $null
     }
     try {
-        return ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o")
+        return ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
     }
     catch {
         return $null
@@ -67,7 +67,7 @@ if (-not (Test-Path -LiteralPath $resolvedStateFile -PathType Leaf)) {
     throw "State file was not found. Refusing to stop any process."
 }
 try {
-    $state = Get-Content -LiteralPath $resolvedStateFile -Raw | ConvertFrom-Json
+    $state = ConvertFrom-ServiceStateJson -Content (Get-Content -LiteralPath $resolvedStateFile -Raw)
 }
 catch {
     throw "Invalid state schema. Refusing to stop any process."
@@ -75,24 +75,19 @@ catch {
 $expectedKeys = @("pid", "bind_host", "port", "start_time_utc", "bundle_root")
 $actualKeys = @($state.PSObject.Properties.Name | Sort-Object)
 if (($actualKeys -join ",") -ne (($expectedKeys | Sort-Object) -join ",") -or
-    $state.pid -isnot [long] -or $state.port -isnot [long] -or
+    (($state.pid -isnot [int]) -and ($state.pid -isnot [long])) -or
+    (($state.port -isnot [int]) -and ($state.port -isnot [long])) -or
     $state.bind_host -isnot [string] -or $state.bundle_root -isnot [string] -or
     $state.start_time_utc -isnot [string] -or $state.pid -lt 1 -or $state.port -lt 1 -or $state.port -gt 65535) {
     throw "Invalid state schema. Refusing to stop any process."
 }
 try {
-    $normalizedStateTime = ([DateTime]::Parse(
-        $state.start_time_utc,
-        [Globalization.CultureInfo]::InvariantCulture,
-        [Globalization.DateTimeStyles]::RoundtripKind
-    )).ToUniversalTime().ToString("o")
     $stateBundleRoot = (Resolve-Path -LiteralPath $state.bundle_root).Path
 }
 catch {
     throw "Invalid state schema. Refusing to stop any process."
 }
-if ($normalizedStateTime -cne $state.start_time_utc -or
-    $stateBundleRoot -cne $resolvedBundleRoot -or $state.bind_host -cne $canonicalBindHost -or $state.port -ne $Port) {
+if ($stateBundleRoot -cne $resolvedBundleRoot -or $state.bind_host -cne $canonicalBindHost -or $state.port -ne $Port) {
     throw "State does not match the requested nonsecret service settings. Refusing to stop any process."
 }
 

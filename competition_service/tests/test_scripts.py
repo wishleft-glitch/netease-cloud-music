@@ -109,6 +109,109 @@ finally {{
             result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", command], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise the launcher state parser")
+    def test_powershell_restart_accepts_launcher_iso_state_before_safe_identity_handoff(self) -> None:
+        start_script_path = SCRIPTS / "start_service.ps1"
+        restart_script_path = SCRIPTS / "restart_service.ps1"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            bundle_root = temporary_root / "bundle"
+            bundle_root.mkdir()
+            (bundle_root / "current.json").write_text("{}", encoding="utf-8")
+            state_file = temporary_root / "service-state.json"
+            command = f'''$ErrorActionPreference = "Stop"
+trap {{ [Console]::Error.WriteLine("STATE-PARSER-TEST: " + $_.Exception.Message); exit 97 }}
+$bundleRoot = {str(bundle_root)!r}
+$stateFile = {str(state_file)!r}
+$script:expectedCreationTime = "2030-01-02T03:04:05.0000000Z"
+$stateJson = '{{"pid":424242,"bind_host":"10.20.30.40","port":8000,"start_time_utc":"' + $script:expectedCreationTime + '","bundle_root":' + ($bundleRoot | ConvertTo-Json -Compress) + '}}'
+[System.IO.File]::WriteAllText($stateFile, $stateJson, [System.Text.UTF8Encoding]::new($false))
+$script:stoppedPid = $null
+$script:launchCalled = $false
+function Get-CimInstance {{
+    [CmdletBinding()]
+    param([string]$ClassName, [string]$Filter)
+    if ($Filter -match "424242") {{
+        return [pscustomobject]@{{
+            CommandLine = 'py -3.12 -m competition_emotion.service --bundle-root "' + $bundleRoot + '" --host 10.20.30.40 --port 8000'
+            CreationDate = [DateTime]::ParseExact($script:expectedCreationTime, "o", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        }}
+    }}
+    if ($Filter -match "434343") {{
+        return [pscustomobject]@{{ CreationDate = [DateTime]::ParseExact($script:expectedCreationTime, "o", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) }}
+    }}
+    return $null
+}}
+function Stop-Process {{
+    [CmdletBinding()]
+    param([int]$Id, $InputObject, [switch]$Force)
+    if ($PSBoundParameters.ContainsKey("Id")) {{ $script:stoppedPid = $Id }}
+}}
+function Wait-Process {{ [CmdletBinding()] param([int]$Id, [int]$Timeout) }}
+function Get-Process {{
+    [CmdletBinding()]
+    param([int]$Id)
+    if ($Id -eq 434343) {{ return [pscustomobject]@{{ Id = 434343; HasExited = $false }} }}
+    return $null
+}}
+function Start-Process {{
+    [CmdletBinding()]
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$PassThru)
+    $script:launchCalled = $true
+    return [pscustomobject]@{{ Id = 434343 }}
+}}
+function Start-Sleep {{ param([int]$Milliseconds) }}
+
+. {str(restart_script_path)!r} -BundleRoot $bundleRoot -BindHost "10.20.30.40" -Port 8000 -StateFile $stateFile 6>$null
+if ($script:stoppedPid -ne 424242 -or -not $script:launchCalled) {{
+    throw "Restart did not reach the safe stop and replacement launch path."
+}}
+
+[System.IO.File]::WriteAllText($stateFile, $stateJson, [System.Text.UTF8Encoding]::new($false))
+. {str(start_script_path)!r} -BundleRoot $bundleRoot -BindHost "10.20.30.40" -Port 8000 -StateFile $stateFile
+$snapshot = Get-StateSnapshot -Path $stateFile
+if ((Get-ExistingStateStatus -Snapshot $snapshot) -cne "LiveOwned") {{
+    throw "Start classified a valid owned state as stale."
+}}
+
+function Get-Command {{
+    [CmdletBinding()]
+    param([string]$Name)
+    if ($Name -eq "ConvertFrom-Json") {{
+        return [pscustomobject]@{{ Parameters = @{{}} }}
+    }}
+    return Microsoft.PowerShell.Core\\Get-Command @PSBoundParameters
+}}
+if ((ConvertFrom-ServiceStateJson -Content $stateJson).start_time_utc -cne $script:expectedCreationTime) {{
+    throw "The legacy PowerShell parser fallback did not preserve the canonical timestamp."
+}}
+
+$nonUtcJson = $stateJson.Replace($script:expectedCreationTime, "2030-01-02T11:04:05.0000000+08:00")
+try {{
+    ConvertFrom-ServiceStateJson -Content $nonUtcJson | Out-Null
+    throw "Non-UTC timestamp was accepted."
+}}
+catch {{
+    if ($_.Exception.Message -notmatch "Invalid state schema") {{ throw }}
+}}
+$malformedJson = $stateJson.Replace($script:expectedCreationTime, "2030-01-02T03:04:05Z")
+try {{
+    ConvertFrom-ServiceStateJson -Content $malformedJson | Out-Null
+    throw "Malformed timestamp was accepted."
+}}
+catch {{
+    if ($_.Exception.Message -notmatch "Invalid state schema") {{ throw }}
+}}
+exit 0'''
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 0, f"exit={result.returncode}\n" + result.stderr + result.stdout)
+
     def test_start_script_validates_bundle_and_keeps_proxy_out_of_logs_and_state(self) -> None:
         source = read(SCRIPTS / "start_service.ps1")
 
@@ -158,7 +261,7 @@ finally {{
     def test_restart_script_refuses_untrusted_state_before_stopping_a_process(self) -> None:
         source = read(SCRIPTS / "restart_service.ps1")
 
-        self.assertIn("ConvertFrom-Json", source)
+        self.assertIn("ConvertFrom-ServiceStateJson -Content", source)
         self.assertIn("state schema", source)
         self.assertIn("Get-CimInstance Win32_Process", source)
         self.assertRegex(source, r"competition_emotion\\+\.service")
