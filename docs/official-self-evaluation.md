@@ -62,6 +62,14 @@ Measured from the formal run on 2026-09-11:
 
 This is a measured local improvement over the previous bundle (Top-1 0.608985, macro recall 0.560564), but it does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps the candidate-limited internal semantic reviewer enabled for low-margin requests. Its independent Dev/Test result must be recorded before claiming the competition target.
 
+On this fixed Test, the default `margin < 0.10` route sends 536 of the 601
+strict-singleton songs to review; their correct label is present in the Top-10
+pool for 97.01% of routed songs, while the 65 directly released songs are
+96.92% correct. Therefore a reviewer that selects the correct candidate on at
+least 94.8% of routed singleton cases would clear 95% overall on this split.
+This is a readiness calculation, not a claimed reviewer result; it must be
+replaced with measurements from the actual internal endpoint.
+
 ## Rubric, evidence, and calibration controls
 
 The repository now includes a versioned 15-label Rubric at
