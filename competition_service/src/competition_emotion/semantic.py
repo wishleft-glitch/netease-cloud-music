@@ -20,6 +20,7 @@ class SemanticReviewConfig:
     url: str
     timeout_seconds: float = 3.0
     min_score_gap: float = 0.10
+    candidate_count: int = 7
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.url)
@@ -53,6 +54,12 @@ class SemanticReviewConfig:
             or not 0.0 <= float(self.min_score_gap) <= 1.0
         ):
             raise ValueError("semantic review min_score_gap must be between 0 and 1")
+        if (
+            isinstance(self.candidate_count, bool)
+            or not isinstance(self.candidate_count, int)
+            or not 2 <= self.candidate_count <= 15
+        ):
+            raise ValueError("semantic review candidate_count must be between 2 and 15")
 
 
 @dataclass(frozen=True)

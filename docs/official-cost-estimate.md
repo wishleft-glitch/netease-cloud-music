@@ -1,6 +1,6 @@
 # Official service cost estimate
 
-This is a planning formula, not a measured production cost or performance claim. The current observed artifact on 2026-09-11 is the active `versions/23622c1a9d1b43c99b8d1d5bf202f9cf/model.joblib` under the official bundle pointer: 23,646,672 bytes (about 22.6 MiB). Its report declares model type `lyrics_tfidf_logreg`, model version `metadata-svc-v2`, and report schema version 2.
+This is a planning formula, not a measured production cost or performance claim. The current observed artifact on 2026-09-11 is the active `versions/a53e28a7438a4046bcf63e5cf0cb48bf/model.joblib` under the official bundle pointer: 23,646,672 bytes (about 22.6 MiB). Its report declares model type `lyrics_tfidf_logreg`, model version `metadata-svc-v2`, and report schema version 2.
 
 | Cost component | Formula per recognition request | Current input/status |
 | --- | --- | --- |
@@ -16,6 +16,6 @@ P50 latency is unavailable until an end-to-end benchmark is measured on the depl
 
 ## Formal accuracy provenance
 
-The exact formal source is [`official-self-evaluation.md`](official-self-evaluation.md), which identifies the active `report.json`. That report's source provenance is `emotion_songs_20260910.xlsx`, SHA-256 `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`, with 5,894 raw rows. For model version `metadata-svc-v2`, its formal held-out metrics are `evaluation_metrics.strict_top1_accuracy = 0.6089850249584027` on 601 strict-singleton test songs, and `evaluation_metrics.macro_recall = 0.5605640997855902`. The report also records strict-singleton Top-2 coverage of `0.7753743760399334`, Top-3 coverage of `0.8552412645590682`, 1,009 any-positive held-out songs, and 408 multi-label held-out songs.
+The exact formal source is [`official-self-evaluation.md`](official-self-evaluation.md), which identifies the active `report.json`. That report's source provenance is `emotion_songs_20260910.xlsx`, SHA-256 `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`, with 5,894 raw rows. For model version `metadata-svc-v2`, its formal held-out metrics are `evaluation_metrics.strict_top1_accuracy = 0.6089850249584027` on 601 strict-singleton test songs, and `evaluation_metrics.macro_recall = 0.5605640997855902`. The report also records strict-singleton Top-2 coverage of `0.7753743760399334`, Top-3 coverage of `0.8552412645590682`, Top-7 coverage of `0.956738768718802`, 1,009 any-positive held-out songs, and 408 multi-label held-out songs.
 
 These are offline baseline evaluation metrics, not a production accuracy guarantee. The report does not publish end-to-end latency percentiles, QPS, or cost.

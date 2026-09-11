@@ -471,7 +471,7 @@ def create_app(
         ranked.sort(key=lambda item: item[1], reverse=True)
         review_evidence: str | None = None
         if semantic_config is not None and ranked[0][1] - ranked[1][1] < semantic_config.min_score_gap:
-            candidates = [label for label, _ in ranked[:3]]
+            candidates = [label for label, _ in ranked[: semantic_config.candidate_count]]
             try:
                 reviewed = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -566,6 +566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--semantic-reranker-url")
     parser.add_argument("--semantic-reranker-timeout-seconds", type=float)
     parser.add_argument("--semantic-reranker-min-gap", type=float)
+    parser.add_argument("--semantic-reranker-candidate-count", type=int)
     arguments = parser.parse_args(argv)
     try:
         host_address = ipaddress.ip_address(arguments.host)
@@ -602,6 +603,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.semantic_reranker_min_gap is not None
             else float(os.environ.get("SEMANTIC_RERANKER_MIN_GAP", "0.10"))
         )
+        semantic_candidate_count = (
+            arguments.semantic_reranker_candidate_count
+            if arguments.semantic_reranker_candidate_count is not None
+            else int(os.environ.get("SEMANTIC_RERANKER_CANDIDATE_COUNT", "7"))
+        )
     except ValueError:
         parser.error("semantic reviewer environment values must be numeric")
     semantic_config = None
@@ -611,6 +617,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 semantic_url,
                 timeout_seconds=semantic_timeout,
                 min_score_gap=semantic_gap,
+                candidate_count=semantic_candidate_count,
             )
         except ValueError as error:
             parser.error(str(error))

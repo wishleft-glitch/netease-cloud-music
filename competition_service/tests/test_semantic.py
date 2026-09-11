@@ -20,11 +20,14 @@ class SemanticReviewTests(unittest.TestCase):
             SemanticReviewConfig("http://user:pass@reviewer.internal/review")
         with self.assertRaisesRegex(ValueError, "min_score_gap"):
             SemanticReviewConfig("http://reviewer.internal/review", min_score_gap=2)
+        with self.assertRaisesRegex(ValueError, "candidate_count"):
+            SemanticReviewConfig("http://reviewer.internal/review", candidate_count=1)
         with self.assertRaisesRegex(ValueError, "internal host"):
             SemanticReviewConfig("https://reviewer.example.com/review")
 
     def test_config_defaults_to_cost_bounded_review_gap(self) -> None:
         self.assertEqual(self.config.min_score_gap, 0.10)
+        self.assertEqual(self.config.candidate_count, 7)
 
     def test_review_sends_song_context_and_accepts_only_a_candidate(self) -> None:
         response = MagicMock()

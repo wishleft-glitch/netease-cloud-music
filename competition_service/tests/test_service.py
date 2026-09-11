@@ -359,7 +359,7 @@ class ServiceTests(unittest.TestCase):
             _write_bundle(Path(self.directory.name) / "semantic-bundle"),
             audio_config=None,
             semantic_config=SemanticReviewConfig(
-                "http://reviewer.internal/review", min_score_gap=1.0
+                "http://reviewer.internal/review", min_score_gap=1.0, candidate_count=3
             ),
         )
         semantic_client = TestClient(semantic_app)

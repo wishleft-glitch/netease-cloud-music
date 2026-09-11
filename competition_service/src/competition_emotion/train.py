@@ -216,6 +216,9 @@ def train_text_baseline(
     evaluation.update(
         _top_k_metrics(_targets(test_songs, configured_labels), scores, k=3)
     )
+    evaluation.update(
+        _top_k_metrics(_targets(test_songs, configured_labels), scores, k=7)
+    )
     predictions = _prediction_records(test_songs, scores, configured_labels)
 
     report: dict[str, Any] = {
