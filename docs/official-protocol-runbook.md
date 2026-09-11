@@ -4,7 +4,7 @@
 
 `client -> nonloopback listener -> FastAPI request validation -> metadata-aware local model -> optional candidate-limited semantic review -> optional audio acquisition -> response`.
 
-The service loads the immutable bundle selected by `BundleRoot\\current.json` at startup. The local model ranks all 15 labels and returns one label plus a second candidate. When an optional semantic review URL is configured and the local margin is below the configured threshold, the reviewer may choose only from the local Top-10 candidates. The reviewer also receives the versioned soft Rubric context and must return a lyric quote that occurs in the supplied lyrics plus any Rubric rule IDs it used. An invalid, slow, or unavailable reviewer result falls back to the local ranking. The two models in the complete chain are the local classifier and the optional semantic reviewer; audio measurement is a bounded evidence path and does not change ranked labels. The formal held-out limitations are recorded in [`official-self-evaluation.md`](official-self-evaluation.md); no hidden-set accuracy claim follows from that evaluation.
+The service loads the immutable bundle selected by `BundleRoot\\current.json` at startup. The local model ranks all 15 labels and returns one label plus a second candidate. When an optional semantic review URL is configured and the local margin is below the configured threshold, the reviewer may choose only from the adaptive local candidate pool (up to Top-10). The reviewer also receives the versioned soft Rubric context and must return a lyric quote that occurs in the supplied lyrics plus any Rubric rule IDs it used. An invalid, slow, or unavailable reviewer result falls back to the local ranking. The two models in the complete chain are the local classifier and the optional semantic reviewer; audio measurement is a bounded evidence path and does not change ranked labels. The formal held-out limitations are recorded in [`official-self-evaluation.md`](official-self-evaluation.md); no hidden-set accuracy claim follows from that evaluation.
 
 Direct audio mode resolves and accepts only security-pinned public addresses. Proxy mode requires both a proxy origin and an exact allowlist of permitted DNS hosts. Do not use a proxy without the exact allowlist.
 
@@ -61,10 +61,10 @@ Expect HTTP 200 and a JSON payload with `ready: true`, the bundle model type, mo
 | `EMOTION_SEMANTIC_RERANKER_URL` | Optional internal candidate reviewer | Set only to an approved internal HTTP(S) endpoint (`.internal`, `.local`, `.corp`, or private IP); leave empty to disable. |
 | `--semantic-reranker-timeout-seconds` | Reviewer timeout | 0.1–10 seconds; keep below the overall 25-second request budget. |
 | `--semantic-reranker-min-gap` | Local score gap below which review runs | Default 0.10; calibrate on a separate validation set. |
-| `--semantic-reranker-candidate-count` | Number of local candidates supplied to the reviewer | Default 10; valid range 2–15; larger pools improve coverage but increase review ambiguity and prompt size. |
+| `--semantic-reranker-candidate-count` | Upper bound for local candidates supplied to the reviewer | Default 10; valid range 2–15. The service adapts this upper bound by score gap: below 0.03 uses the configured bound, 0.03–0.06 uses at most 7, and 0.06–0.10 uses at most 5. |
 
 The reviewer endpoint is intentionally small and deterministic to integrate:
-it receives the song fields, lyrics, the Top-10 candidate labels, and their
+it receives the song fields, lyrics, the adaptive local candidate labels, and their
 Rubric entries; it must return exactly one candidate with `confidence`, a short
 `evidence` string, at least one verbatim `quotes` item found in the supplied
 lyrics, and the corresponding `rule_ids`. Any schema, candidate, quote, or

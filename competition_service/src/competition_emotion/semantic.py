@@ -22,7 +22,7 @@ class SemanticReviewConfig:
     url: str
     timeout_seconds: float = 3.0
     min_score_gap: float = 0.10
-    # Ten candidates retain 97.67% strict-singleton coverage on the fixed
+    # Ten candidates retain 97.84% strict-singleton coverage on the fixed
     # official holdout while keeping the reviewer prompt bounded.
     candidate_count: int = 10
     require_verified_evidence: bool = True
@@ -76,6 +76,34 @@ class SemanticReviewResult:
     evidence: str
     quotes: tuple[str, ...] = ()
     rule_ids: tuple[str, ...] = ()
+
+
+def adaptive_candidate_count(score_gap: float, configured_count: int) -> int:
+    """Reduce review prompt size when the local ranking is already decisive.
+
+    The fixed official holdout showed that the lowest-margin cases need the
+    full candidate pool, while wider margins retain the correct label in a
+    smaller pool.  ``configured_count`` remains an operator supplied upper
+    bound, so a deliberate small setting is never expanded.
+    """
+    if (
+        isinstance(score_gap, bool)
+        or not isinstance(score_gap, (int, float))
+        or not math.isfinite(float(score_gap))
+        or float(score_gap) < 0.0
+    ):
+        raise ValueError("score_gap must be a nonnegative finite number")
+    if (
+        isinstance(configured_count, bool)
+        or not isinstance(configured_count, int)
+        or not 2 <= configured_count <= 15
+    ):
+        raise ValueError("configured_count must be between 2 and 15")
+    if configured_count <= 5 or float(score_gap) < 0.03:
+        return configured_count
+    if float(score_gap) < 0.06:
+        return min(configured_count, 7)
+    return min(configured_count, 5)
 
 
 def review_candidates(

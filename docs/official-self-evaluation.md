@@ -18,7 +18,7 @@ The report is the source of record for the following baseline metrics:
 | Top-1 | `evaluation_metrics.strict_top1_accuracy` | Exact predicted-label accuracy on the `strict_singleton_sample_count` test songs that have exactly one positive official label. |
 | Top-2 hit | `evaluation_metrics.strict_singleton_top2_hit_rate` / `any_positive_top2_hit_rate` | Whether the gold label appears in the first two candidates; this is the coverage available to the semantic review stage. |
 | Top-7 hit | `evaluation_metrics.strict_singleton_top7_hit_rate` / `any_positive_top7_hit_rate` | Candidate coverage available to the semantic review stage. |
-| Top-10 hit | `evaluation_metrics.strict_singleton_top10_hit_rate` / `any_positive_top10_hit_rate` | Higher-coverage candidate pool used by the default semantic review stage. |
+| Top-10 hit | `evaluation_metrics.strict_singleton_top10_hit_rate` / `any_positive_top10_hit_rate` | Maximum candidate-pool coverage before the adaptive semantic review stage. |
 | Macro recall | `evaluation_metrics.macro_recall` | Mean per-label recall across the configured official labels on the held-out test set. |
 
 `evaluation_sample_counts` supplies the denominators. `any_positive_sample_count`
@@ -63,11 +63,13 @@ Measured from the formal run on 2026-09-11:
 The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v5 score. The v5 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps the candidate-limited internal semantic reviewer enabled for low-margin requests. Its independent Dev/Test result must be recorded before claiming the competition target.
 
 On this fixed Test, the default `margin < 0.10` route sends 567 of the 601
-strict-singleton songs to review; their correct label is present in the Top-10
-pool for 97.71% of routed songs, while the 34 directly released songs are
-97.06% correct. This is only a candidate-pool recall check. Because there are
-15 labels, an uninformative pool of 10 labels would already cover about 66.7%;
-97.71% must not be reported as 97% accuracy. Conditionally, a reviewer that
+strict-singleton songs to review. The adaptive pool uses 10 candidates for 395
+hard cases, 7 for 104 cases, and 5 for 68 cases: 8.85 candidates per reviewed
+song on average, about 11.5% fewer candidate slots than a fixed Top-10 pool.
+The correct label remains in the adaptive pool for 97.1781% of routed songs;
+the 34 directly released songs are 97.06% correct. This is only a candidate-pool
+recall check. Because there are 15 labels, an uninformative pool of 10 labels
+would already cover about 66.7%; 97.1781% must not be reported as 97% accuracy. Conditionally, a reviewer that
 selects the correct candidate on at least 95.3% of routed singleton cases would
 clear 95% overall on this split. That is a readiness calculation, not a
 measured reviewer result; the actual endpoint must be evaluated end to end.

@@ -5,7 +5,7 @@ from __future__ import annotations
 _LYRIC_EVIDENCE = "基于可用歌词文本进行情绪判定。"
 _TITLE_EVIDENCE = "仅基于歌曲名称进行情绪判定。"
 def _metadata_phrase(metadata_fields: tuple[str, ...] | None) -> str:
-    fields = metadata_fields or ("歌曲名称", "艺人", "专辑/风格元数据")
+    fields = metadata_fields or ("歌曲名称", "艺人", "专辑元数据")
     cleaned = tuple(dict.fromkeys(field.strip() for field in fields if field.strip()))
     return "、".join(cleaned)
 

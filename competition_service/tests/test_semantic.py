@@ -5,6 +5,7 @@ import unittest
 
 from competition_emotion.semantic import (
     SemanticReviewConfig,
+    adaptive_candidate_count,
     review_candidates,
 )
 from competition_emotion.rubric import DEFAULT_RUBRIC_PATH, load_rubric
@@ -29,6 +30,12 @@ class SemanticReviewTests(unittest.TestCase):
     def test_config_defaults_to_cost_bounded_review_gap(self) -> None:
         self.assertEqual(self.config.min_score_gap, 0.10)
         self.assertEqual(self.config.candidate_count, 10)
+
+    def test_adaptive_candidate_count_keeps_hard_cases_wide_and_easy_cases_small(self) -> None:
+        self.assertEqual(adaptive_candidate_count(0.02, 10), 10)
+        self.assertEqual(adaptive_candidate_count(0.05, 10), 7)
+        self.assertEqual(adaptive_candidate_count(0.08, 10), 5)
+        self.assertEqual(adaptive_candidate_count(0.08, 3), 3)
 
     def test_review_sends_song_context_and_accepts_only_a_candidate(self) -> None:
         response = MagicMock()

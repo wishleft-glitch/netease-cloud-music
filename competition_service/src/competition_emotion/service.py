@@ -35,7 +35,7 @@ from .iteration import TraceRecord, append_trace
 from .lyrics import compose_lyrics
 from .rubric import DEFAULT_RUBRIC_PATH, load_rubric
 from .request_audio import RequestAudioConfig, RequestAudioResult, acquire_request_audio
-from .semantic import SemanticReviewConfig, review_candidates
+from .semantic import SemanticReviewConfig, adaptive_candidate_count, review_candidates
 from .train import BUNDLE_POINTER_SCHEMA_VERSION, MODEL_TYPE, REPORT_SCHEMA_VERSION
 from .types import Song
 
@@ -497,7 +497,10 @@ def create_app(
         reviewed = None
         review_evidence: str | None = None
         if semantic_config is not None and ranked[0][1] - ranked[1][1] < semantic_config.min_score_gap:
-            candidates = [label for label, _ in ranked[: semantic_config.candidate_count]]
+            candidate_count = adaptive_candidate_count(
+                ranked[0][1] - ranked[1][1], semantic_config.candidate_count
+            )
+            candidates = [label for label, _ in ranked[:candidate_count]]
             candidate_labels = tuple(candidates)
             try:
                 reviewed = await asyncio.wait_for(
@@ -554,7 +557,7 @@ def create_app(
             if request.artists and request.artists.strip():
                 fields.append("艺人")
             if request.album_name and request.album_name.strip():
-                fields.append("专辑/风格元数据")
+                fields.append("专辑元数据")
             metadata_fields = tuple(fields)
         evidence = build_evidence(
             lyric_used=lyric_used,

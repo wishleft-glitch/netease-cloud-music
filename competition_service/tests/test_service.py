@@ -385,6 +385,27 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(candidates, ["孤独", "思念", "悲伤"])
         self.assertEqual(review.call_args.args[4].version, "emotion-rubric-v1")
 
+    def test_semantic_review_shrinks_candidate_pool_for_a_clearer_low_margin_case(self) -> None:
+        semantic_app = create_app(
+            _write_bundle(Path(self.directory.name) / "adaptive-semantic-bundle"),
+            audio_config=None,
+            semantic_config=SemanticReviewConfig(
+                "http://reviewer.internal/review", min_score_gap=0.10, candidate_count=10
+            ),
+        )
+        semantic_client = TestClient(semantic_app)
+        scores = self._scores(孤独=0.28, 思念=0.20, 悲伤=0.19)
+        with patch.object(semantic_app.state.runtime.scorer, "score", return_value=scores), patch(
+            "competition_emotion.service.review_candidates",
+            return_value=SemanticReviewResult("悲伤", 0.91, "歌词表达失恋后的悲伤。"),
+        ) as review:
+            response = semantic_client.post(
+                "/api/v1/emotion/recognize",
+                json=self._request(text_lyric="任意歌词"),
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(review.call_args.args[2]), 5)
+
     def test_optional_trace_path_records_prediction_without_blocking_response(self) -> None:
         trace_path = Path(self.directory.name) / "traces" / "emotion.jsonl"
         app = create_app(
