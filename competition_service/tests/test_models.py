@@ -56,6 +56,21 @@ def song_with_artist(song_id: str, labels: set[str], name: str, artist: str, tex
     )
 
 
+def song_with_album(
+    song_id: str, labels: set[str], name: str, artist: str, album: str, text: str
+) -> Song:
+    return Song(
+        song_id=song_id,
+        labels=frozenset(labels),
+        name=name,
+        artists=artist,
+        genre="",
+        text=text,
+        audio_url="",
+        album_name=album,
+    )
+
+
 class TextScorerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.songs = [
@@ -151,6 +166,22 @@ class TextScorerTests(unittest.TestCase):
         self.assertNotIn("单首艺人", scorer.artist_overrides)
         self.assertNotIn("混合艺人", scorer.artist_overrides)
 
+    def test_fit_builds_high_agreement_album_override_and_applies_it(self) -> None:
+        songs = [
+            song_with_album("1", {"狂欢"}, "a", "艺人一", "同一专辑", "party"),
+            song_with_album("2", {"狂欢"}, "b", "艺人二", "同一专辑", "dance"),
+            song_with_album("3", {"孤独"}, "c", "艺人三", "另一专辑", "lonely"),
+            song_with_album("4", {"孤独"}, "d", "艺人四", "另一专辑", "alone"),
+        ]
+        scorer = TextScorer().fit(songs, LABELS)
+
+        self.assertEqual(scorer.album_overrides, {"同一专辑": "狂欢", "另一专辑": "孤独"})
+        adjusted = scorer.apply_song_overrides(
+            song_with_album("5", set(), "e", "新艺人", "同一专辑", "unknown"),
+            {"狂欢": 0.2, "孤独": 0.8},
+        )
+        self.assertGreater(adjusted["狂欢"], adjusted["孤独"])
+
     def test_single_label_configuration_rejects_missing_real_negatives(self) -> None:
         songs = [
             song("1", {"孤独"}, "一个人", "一个人 孤独"),
@@ -209,6 +240,7 @@ class TextScorerTests(unittest.TestCase):
 
             self.assertEqual(saved_payload["schema_version"], 2)
             self.assertIn("artist_overrides", saved_payload)
+            self.assertIn("album_overrides", saved_payload)
             self.assertEqual(loaded.labels, LABELS)
             np.testing.assert_allclose(
                 list(loaded.score("一个人孤独没有你").values()),

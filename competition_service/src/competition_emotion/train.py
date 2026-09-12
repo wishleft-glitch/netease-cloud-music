@@ -260,6 +260,7 @@ def train_text_baseline(
             "artist_override_min_songs": 2,
             "artist_override_min_agreement": 0.8,
             "artist_override_count": len(evaluation_scorer.artist_overrides),
+            "album_override_count": len(evaluation_scorer.album_overrides),
         },
         "source": source,
         "labels": list(configured_labels),
@@ -294,6 +295,7 @@ def train_text_baseline(
             "selection_report": "evaluation metrics were computed before full-fit serving retrain",
         }
         report["postprocessing"]["artist_override_count"] = len(scorer.artist_overrides)
+        report["postprocessing"]["album_override_count"] = len(scorer.album_overrides)
 
     _publish_bundle(Path(bundle_dir), scorer, report, predictions)
     return report

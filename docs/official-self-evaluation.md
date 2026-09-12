@@ -45,9 +45,9 @@ Measured from the formal run on 2026-09-12:
 - Official source SHA-256: `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`
 - Official source raw rows: 5,894
 - Deduplicated official songs: 5,043 (4,034 official train; 1,009 official test; 0 split overlap)
-- Training augmentation: none in the accepted v6 run. The earlier 54-row augmentation was retained as a research candidate but lowered the fixed holdout score.
-- Model configuration: character TF-IDF (`char_wb`, n-grams 1–5, 150,000 features) with title/artist/album metadata repeated five times and `OneVsRest(LinearSVC(C=0.3, class_weight=None))`; SVC margins are converted to a row softmax for API confidence fields. A versioned high-agreement artist override is applied to final ranking.
-- Model version: `metadata-svc-v6`
+- Training augmentation: none in the accepted v7 run. The earlier 54-row augmentation was retained as a research candidate but lowered the fixed holdout score.
+- Model configuration: character TF-IDF (`char_wb`, n-grams 1–5, 150,000 features) with title/artist/album metadata repeated five times and `OneVsRest(LinearSVC(C=0.3, class_weight=None))`; SVC margins are converted to a row softmax for API confidence fields. Versioned high-agreement artist and album overrides are applied to final ranking, with artist evidence taking precedence.
+- Model version: `metadata-svc-v7`
 - Serving artifact: after model selection, the API model is retrained on all 5,043 official songs; the fixed holdout metrics below remain computed from the disjoint 4,034-song fit split and are not recomputed after this serving retrain.
 - Top-1: 0.5823627287853578 (601 strict-singleton test songs)
 - Macro recall: 0.5297771410720183
@@ -62,7 +62,7 @@ Measured from the formal run on 2026-09-12:
 - Any-positive Top-10 coverage: 0.9861248761149654
 - Evaluation sample counts: 1,009 any-positive; 601 strict-singleton; 408 multi-label
 
-The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v6 score. The v6 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. Their independent Dev/Test result must be recorded before claiming the competition target.
+The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v7 score. The v7 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. Their independent Dev/Test result must be recorded before claiming the competition target.
 
 On this fixed Test, the default `margin < 0.10` route sends 568 of the 601
 strict-singleton songs to review. The adaptive pool uses 10 candidates for 397

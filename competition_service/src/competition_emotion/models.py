@@ -95,6 +95,31 @@ def _label_order_sha256(labels: tuple[str, ...]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _high_agreement_overrides(
+    songs: list[Song],
+    targets: np.ndarray,
+    labels: tuple[str, ...],
+    field_name: str,
+) -> dict[str, str]:
+    """Build a conservative exact metadata-to-label map from the fit split."""
+    counts: dict[str, np.ndarray] = defaultdict(
+        lambda: np.zeros(len(labels), dtype=np.int32)
+    )
+    totals: dict[str, int] = defaultdict(int)
+    for song, target in zip(songs, targets, strict=True):
+        key = str(getattr(song, field_name, "")).strip()
+        if not key:
+            continue
+        counts[key] += target
+        totals[key] += 1
+    return {
+        key: labels[int(np.argmax(label_counts))]
+        for key, label_counts in counts.items()
+        if totals[key] >= _ARTIST_OVERRIDE_MIN_SONGS
+        and float(np.max(label_counts)) / totals[key] >= _ARTIST_OVERRIDE_MIN_AGREEMENT
+    }
+
+
 @dataclass
 class TextScorer:
     labels: tuple[str, ...] = ()
@@ -103,6 +128,7 @@ class TextScorer:
     score_mode: str = "probability"
     input_mode: str = "legacy"
     artist_overrides: dict[str, str] = field(default_factory=dict)
+    album_overrides: dict[str, str] = field(default_factory=dict)
 
     def fit(self, songs: list[Song], labels: tuple[str, ...]) -> TextScorer:
         configured_labels = _validate_labels(labels)
@@ -148,23 +174,12 @@ class TextScorer:
         )
         classifier.fit(features, targets)
 
-        artist_counts: dict[str, np.ndarray] = defaultdict(
-            lambda: np.zeros(len(configured_labels), dtype=np.int32)
+        artist_overrides = _high_agreement_overrides(
+            songs, targets, configured_labels, "artists"
         )
-        artist_totals: dict[str, int] = defaultdict(int)
-        for song, target in zip(songs, targets, strict=True):
-            artist = song.artists.strip()
-            if not artist:
-                continue
-            artist_counts[artist] += target
-            artist_totals[artist] += 1
-        artist_overrides = {
-            artist: configured_labels[int(np.argmax(counts))]
-            for artist, counts in artist_counts.items()
-            if artist_totals[artist] >= _ARTIST_OVERRIDE_MIN_SONGS
-            and float(np.max(counts)) / artist_totals[artist]
-            >= _ARTIST_OVERRIDE_MIN_AGREEMENT
-        }
+        album_overrides = _high_agreement_overrides(
+            songs, targets, configured_labels, "album_name"
+        )
 
         self.labels = configured_labels
         self.vectorizer = vectorizer
@@ -172,6 +187,7 @@ class TextScorer:
         self.score_mode = "softmax"
         self.input_mode = "metadata_v2"
         self.artist_overrides = artist_overrides
+        self.album_overrides = album_overrides
         return self
 
     def compose_text(self, song: Song) -> str:
@@ -199,11 +215,12 @@ class TextScorer:
     def apply_song_overrides(
         self, song: Song, scores: dict[str, float]
     ) -> dict[str, float]:
-        """Apply deterministic high-agreement artist evidence after text scoring.
+        """Apply deterministic high-agreement artist or album evidence after text scoring.
 
-        The override is learned only from artists with at least two training
-        songs and at least 80% agreement on one label.  It changes ranking when
-        the artist label is not already the model winner, while keeping scores
+        The override is learned only from exact metadata values with at least
+        two training songs and at least 80% agreement on one label. Artist
+        evidence takes precedence over album evidence. It changes ranking when
+        the selected label is not already the model winner, while keeping scores
         bounded for the existing API contract.
         """
         if not isinstance(song, Song):
@@ -221,6 +238,8 @@ class TextScorer:
             adjusted[label] = numeric
 
         selected = self.artist_overrides.get(song.artists.strip())
+        if selected is None:
+            selected = self.album_overrides.get(song.album_name.strip())
         if selected is None:
             return adjusted
         best_label = max(self.labels, key=lambda label: adjusted[label])
@@ -417,6 +436,7 @@ def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
             "score_mode": scorer.score_mode,
             "input_mode": scorer.input_mode,
             "artist_overrides": dict(scorer.artist_overrides),
+            "album_overrides": dict(scorer.album_overrides),
         },
         Path(path),
     )
@@ -494,6 +514,19 @@ def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextSc
         for artist, label in raw_artist_overrides.items()
     ):
         raise ValueError("text scorer payload has invalid artist overrides")
+    raw_album_overrides = record.get("album_overrides", {})
+    if not isinstance(raw_album_overrides, dict):
+        raise ValueError("text scorer payload has invalid album overrides")
+    if len(raw_album_overrides) > 100_000:
+        raise ValueError("text scorer payload has too many album overrides")
+    if any(
+        not isinstance(album, str)
+        or not album.strip()
+        or not isinstance(label, str)
+        or label not in labels
+        for album, label in raw_album_overrides.items()
+    ):
+        raise ValueError("text scorer payload has invalid album overrides")
     scorer = TextScorer(
         labels=labels,
         vectorizer=vectorizer,
@@ -501,6 +534,7 @@ def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextSc
         score_mode=score_mode,
         input_mode=input_mode,
         artist_overrides=dict(raw_artist_overrides),
+        album_overrides=dict(raw_album_overrides),
     )
     try:
         scorer._fitted_components()
