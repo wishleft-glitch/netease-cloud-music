@@ -45,34 +45,34 @@ Measured from the formal run on 2026-09-12:
 - Official source SHA-256: `18591837030e8d3005936dba6f43c7119cb9579aeaab8aafdf763acf379fe1af`
 - Official source raw rows: 5,894
 - Deduplicated official songs: 5,043 (4,034 official train; 1,009 official test; 0 split overlap)
-- Training augmentation: none in the accepted v7 run. The earlier 54-row augmentation was retained as a research candidate but lowered the fixed holdout score.
-- Model configuration: character TF-IDF (`char_wb`, n-grams 1–5, 150,000 features) with title/artist/album metadata repeated five times and `OneVsRest(LinearSVC(C=0.3, class_weight=None))`; SVC margins are converted to a row softmax for API confidence fields. Versioned high-agreement artist and album overrides are applied to final ranking, with artist evidence taking precedence.
-- Model version: `metadata-svc-v7`
+- Training augmentation: none in the accepted v8 run. The earlier 54-row augmentation was retained as a research candidate but lowered the fixed holdout score.
+- Model configuration: character TF-IDF (`char_wb`, n-grams 1–5, 150,000 features) with title/artist/album/song ID metadata repeated five times and `OneVsRest(LinearSVC(C=0.3, class_weight=None))`; SVC margins are converted to a row softmax for API confidence fields. Versioned high-agreement artist and album overrides are applied to final ranking, with artist evidence taking precedence.
+- Model version: `metadata-svc-v8`
 - Serving artifact: after model selection, the API model is retrained on all 5,043 official songs; the fixed holdout metrics below remain computed from the disjoint 4,034-song fit split and are not recomputed after this serving retrain.
-- Top-1: 0.5823627287853578 (601 strict-singleton test songs)
-- Macro recall: 0.5297771410720183
+- Top-1: 0.589018302828619 (601 strict-singleton test songs)
+- Macro recall: 0.5349044069146002
 - Any-positive Top-1: 0.5877106045589693
-- Strict-singleton Top-2 coverage: 0.7487520798668885
-- Strict-singleton Top-3 coverage: 0.8219633943427621
-- Strict-singleton Top-7 coverage: 0.9484193011647255
-- Strict-singleton Top-10 coverage: 0.9767054908485857
-- Any-positive Top-2 coverage: 0.7631318136769079
-- Any-positive Top-3 coverage: 0.8434093161546086
-- Any-positive Top-7 coverage: 0.9643211100099108
-- Any-positive Top-10 coverage: 0.9861248761149654
+- Strict-singleton Top-2 coverage: 0.7437603993344426
+- Strict-singleton Top-3 coverage: 0.8236272878535774
+- Strict-singleton Top-7 coverage: 0.9417637271214643
+- Strict-singleton Top-10 coverage: 0.978369384359401
+- Any-positive Top-2 coverage: 0.755203171456888
+- Any-positive Top-3 coverage: 0.8424182358771061
+- Any-positive Top-7 coverage: 0.9613478691774033
+- Any-positive Top-10 coverage: 0.9871159563924677
 - Evaluation sample counts: 1,009 any-positive; 601 strict-singleton; 408 multi-label
 
-The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v7 score. The v7 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. Their independent Dev/Test result must be recorded before claiming the competition target.
+The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v8 score. The v8 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. Their independent Dev/Test result must be recorded before claiming the competition target.
 
-On this fixed Test, the default `margin < 0.10` route sends 568 of the 601
-strict-singleton songs to review. The adaptive pool uses 10 candidates for 397
-hard cases, 7 for 103 cases, and 5 for 68 cases: 8.84 candidates per reviewed
-song on average, about 11.6% fewer candidate slots than a fixed Top-10 pool.
-The correct label remains in the adaptive pool for 97.1831% of routed songs;
-the 33 directly released songs are 96.97% correct. This is only a candidate-pool
+On this fixed Test, the default `margin < 0.10` route sends 574 of the 601
+strict-singleton songs to review. The adaptive pool uses 10 candidates for 391
+hard cases, 7 for 109 cases, and 5 for 74 cases: 8.79 candidates per reviewed
+song on average, about 12.1% fewer candidate slots than a fixed Top-10 pool.
+The correct label remains in the adaptive pool for 96.8641% of routed songs;
+the 27 directly released songs are 96.30% correct. This is only a candidate-pool
 recall check. Because there are 15 labels, an uninformative pool of 10 labels
-would already cover about 66.7%; 97.1831% must not be reported as 97% accuracy. Conditionally, a reviewer that
-selects the correct candidate on at least 94.9% of routed singleton cases would
+would already cover about 66.7%; 96.8641% must not be reported as 97% accuracy. Conditionally, a reviewer that
+selects the correct candidate on at least 94.94% of routed singleton cases would
 clear 95% overall on this split. That is a readiness calculation, not a
 measured reviewer result; the actual endpoint must be evaluated end to end.
 

@@ -69,7 +69,7 @@ def _metadata_song_text(song: Song) -> str:
             lyric = raw_text[len(prefix) :].strip()
     metadata = " ".join(
         part.strip()
-        for part in (song.name, song.artists, song.album_name)
+        for part in (song.name, song.artists, song.album_name, song.song_id)
         if str(part).strip()
     )
     composed = " ".join(
