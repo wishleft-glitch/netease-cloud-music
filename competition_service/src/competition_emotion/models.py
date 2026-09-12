@@ -107,11 +107,11 @@ def _high_agreement_overrides(
     )
     totals: dict[str, int] = defaultdict(int)
     for song, target in zip(songs, targets, strict=True):
-        key = str(getattr(song, field_name, "")).strip()
-        if not key:
+        raw_value = str(getattr(song, field_name, "")).strip()
+        if not raw_value:
             continue
-        counts[key] += target
-        totals[key] += 1
+        counts[raw_value] += target
+        totals[raw_value] += 1
     return {
         key: labels[int(np.argmax(label_counts))]
         for key, label_counts in counts.items()

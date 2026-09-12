@@ -127,21 +127,22 @@ class ServiceTests(unittest.TestCase):
             elapsed_ms = (perf_counter() - started) * 1000
 
         self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["code"], 200)
+        self.assertEqual(body["error"], "")
         self.assertEqual(
-            response.json(),
             {
-                "code": 200,
-                "data": {
-                    "top_emotion": "狂欢",
-                    "top_confidence": 0.1235,
-                    "second_emotion": "孤独",
-                    "second_confidence": 0.1235,
-                    "evidence": "基于歌曲名称、艺人与可用歌词进行情绪判定。",
-                    "cost_ms": response.json()["data"]["cost_ms"],
-                },
-                "error": "",
+                key: body["data"][key]
+                for key in ("top_emotion", "top_confidence", "second_emotion", "second_confidence")
+            },
+            {
+                "top_emotion": "狂欢",
+                "top_confidence": 0.1235,
+                "second_emotion": "孤独",
+                "second_confidence": 0.1235,
             },
         )
+        self.assertIn("输入歌词片段：", body["data"]["evidence"])
         self.assertIsInstance(response.json()["data"]["cost_ms"], int)
         self.assertGreaterEqual(response.json()["data"]["cost_ms"], 0)
         self.assertLessEqual(response.json()["data"]["cost_ms"], elapsed_ms + 100)
@@ -456,7 +457,8 @@ class ServiceTests(unittest.TestCase):
             compose_model_text(Song("abc", frozenset(), "新歌", "歌手", "", "任意歌词", ""))
         )
         evidence = response.json()["data"]["evidence"]
-        self.assertEqual(evidence, "基于歌曲名称、艺人与可用歌词进行情绪判定。")
+        self.assertTrue(evidence.startswith("基于歌曲名称、艺人与可用歌词进行情绪判定。"))
+        self.assertIn("输入歌词片段：“任意歌词”", evidence)
         self.assertIn("歌曲名称", evidence)
         self.assertIn("艺人", evidence)
         self.assertNotIn("专辑", evidence)

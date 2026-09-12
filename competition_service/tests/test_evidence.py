@@ -50,7 +50,18 @@ class EvidenceTests(unittest.TestCase):
             label="孤独",
             rubric=self.rubric,
         )
-        self.assertEqual(evidence, "基于歌曲名称、艺人、专辑元数据与可用歌词进行情绪判定。")
+        self.assertIn("输入歌词片段：\u201c今天天气很好。\u201d", evidence)
+        self.assertIn("标签定义：", evidence)
+
+    def test_excerpt_is_taken_verbatim_from_the_supplied_lyrics(self) -> None:
+        evidence = build_evidence(
+            lyric_used=True,
+            title_used=False,
+            lyric_text="[00:01.00]窗外有一盏灯，风吹过街道。\n第二行歌词",
+            label="思念",
+            rubric=self.rubric,
+        )
+        self.assertIn("输入歌词片段：\u201c窗外有一盏灯，风吹过街道。\u201d", evidence)
 
 
 if __name__ == "__main__":
