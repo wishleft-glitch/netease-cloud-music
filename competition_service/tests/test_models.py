@@ -183,6 +183,32 @@ class TextScorerTests(unittest.TestCase):
         )
         self.assertGreater(adjusted["狂欢"], adjusted["孤独"])
 
+    def test_playlist_prior_resolves_close_scores_for_known_song_id(self) -> None:
+        songs = [
+            song("100", {"狂欢"}, "a", "party"),
+            song("101", {"狂欢"}, "b", "dance"),
+            song("200", {"孤独"}, "c", "lonely"),
+            song("201", {"孤独"}, "d", "alone"),
+        ]
+        playlist_features = {
+            "100": (1.0, 0.0),
+            "101": (1.0, 0.0),
+            "200": (0.0, 1.0),
+            "201": (0.0, 1.0),
+            "299": (0.0, 1.0),
+        }
+        scorer = TextScorer().fit(
+            songs, LABELS, playlist_features=playlist_features
+        )
+
+        adjusted = scorer.apply_song_overrides(
+            song("299", set(), "unknown", "unknown"),
+            {"狂欢": 0.501, "孤独": 0.499},
+        )
+
+        self.assertGreater(adjusted["孤独"], adjusted["狂欢"])
+        self.assertAlmostEqual(sum(adjusted.values()), 1.0, places=9)
+
     def test_single_label_configuration_rejects_missing_real_negatives(self) -> None:
         songs = [
             song("1", {"孤独"}, "一个人", "一个人 孤独"),

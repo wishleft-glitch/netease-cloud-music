@@ -3,6 +3,7 @@ param(
     [string]$Workbook = "F:\netease\_music\competition\data\emotion_songs_20260910.xlsx",
     [string]$BundleRoot = "F:\netease\_music\competition\runs\official-20260910",
     [string]$AugmentWorkbook = "",
+    [string]$PlaylistPrior = "",
     [switch]$FitAllForServing
 )
 
@@ -14,6 +15,9 @@ if (-not (Test-Path -LiteralPath $Workbook -PathType Leaf)) {
 if ($AugmentWorkbook -and -not (Test-Path -LiteralPath $AugmentWorkbook -PathType Leaf)) {
     throw "Augmentation workbook was not found: $AugmentWorkbook"
 }
+if ($PlaylistPrior -and -not (Test-Path -LiteralPath $PlaylistPrior -PathType Leaf)) {
+    throw "Playlist prior was not found: $PlaylistPrior"
+}
 
 $serviceRoot = Split-Path -Parent $PSScriptRoot
 $previousPythonPath = $env:PYTHONPATH
@@ -23,6 +27,9 @@ try {
     $trainArgs = @("-3.12", "-m", "competition_emotion.train", "--workbook", $Workbook, "--bundle-dir", $BundleRoot)
     if ($AugmentWorkbook) {
         $trainArgs += @("--augment-workbook", $AugmentWorkbook)
+    }
+    if ($PlaylistPrior) {
+        $trainArgs += @("--playlist-prior", $PlaylistPrior)
     }
     if ($FitAllForServing) {
         $trainArgs += "--fit-all-for-serving"

@@ -78,16 +78,20 @@ py -3.12 -m competition_emotion.calibration `
   --output 'F:\\netease\\_music\\competition\\runs\\official-20260910\\calibration-20260911.json'
 ```
 
-The accepted v8 bundle selects the model on the fixed holdout without the
+The accepted v9 bundle selects the model on the fixed holdout without the
 54-row older snapshot augmentation, then retrains the published serving model
-on all official songs. The reproducible command is:
+on all official songs. The accepted model also uses the operator-managed public
+playlist snapshot whose SHA-256 is recorded in `report.json`. The reproducible
+command is:
 
 ```powershell
-.\competition_service\scripts\train_official.ps1 -FitAllForServing
+.\competition_service\scripts\train_official.ps1 `
+  -PlaylistPrior 'F:\netease\_music\competition\research_cache\netease_playlists\playlists_hot_500.json' `
+  -FitAllForServing
 ```
 
 An older augmentation workbook may still be supplied for a research candidate
-with `-AugmentWorkbook`; it is never mixed into the accepted v8 run by default.
+with `-AugmentWorkbook`; it is never mixed into the accepted v9 run by default.
 
 Use `read_traces` and `mine_hard_cases` to build a review queue, then evaluate a
 proposed Rubric patch with `evaluate_patch_gate` on Dev and the immutable Test.

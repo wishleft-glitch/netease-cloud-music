@@ -27,6 +27,9 @@ _MODEL_METADATA_REPEATS = 5
 _TEXT_CLASS_WEIGHT = None
 _ARTIST_OVERRIDE_MIN_SONGS = 2
 _ARTIST_OVERRIDE_MIN_AGREEMENT = 0.8
+_PLAYLIST_PRIOR_ALPHA = 0.1
+_MAX_PLAYLIST_FEATURE_SONGS = 200_000
+_MAX_PLAYLIST_FEATURE_WIDTH = 64
 _SCORE_MODES = frozenset({"probability", "softmax"})
 _INPUT_MODES = frozenset({"legacy", "metadata_v1", "metadata_v2"})
 
@@ -129,8 +132,18 @@ class TextScorer:
     input_mode: str = "legacy"
     artist_overrides: dict[str, str] = field(default_factory=dict)
     album_overrides: dict[str, str] = field(default_factory=dict)
+    playlist_song_features: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    playlist_classifier: OneVsRestClassifier | None = None
+    playlist_feature_width: int = 0
+    playlist_prior_alpha: float = _PLAYLIST_PRIOR_ALPHA
 
-    def fit(self, songs: list[Song], labels: tuple[str, ...]) -> TextScorer:
+    def fit(
+        self,
+        songs: list[Song],
+        labels: tuple[str, ...],
+        *,
+        playlist_features: dict[str, tuple[float, ...]] | None = None,
+    ) -> TextScorer:
         configured_labels = _validate_labels(labels)
         if not songs:
             raise ValueError("songs must be nonempty")
@@ -180,6 +193,9 @@ class TextScorer:
         album_overrides = _high_agreement_overrides(
             songs, targets, configured_labels, "album_name"
         )
+        playlist_song_features, playlist_classifier, playlist_feature_width = (
+            self._fit_playlist_prior(songs, targets, configured_labels, playlist_features)
+        )
 
         self.labels = configured_labels
         self.vectorizer = vectorizer
@@ -188,7 +204,70 @@ class TextScorer:
         self.input_mode = "metadata_v2"
         self.artist_overrides = artist_overrides
         self.album_overrides = album_overrides
+        self.playlist_song_features = playlist_song_features
+        self.playlist_classifier = playlist_classifier
+        self.playlist_feature_width = playlist_feature_width
+        self.playlist_prior_alpha = _PLAYLIST_PRIOR_ALPHA
         return self
+
+    @staticmethod
+    def _fit_playlist_prior(
+        songs: list[Song],
+        targets: np.ndarray,
+        labels: tuple[str, ...],
+        playlist_features: dict[str, tuple[float, ...]] | None,
+    ) -> tuple[dict[str, tuple[float, ...]], OneVsRestClassifier | None, int]:
+        if playlist_features is None:
+            return {}, None, 0
+        if not isinstance(playlist_features, dict):
+            raise ValueError("playlist_features must be a mapping")
+        if len(playlist_features) > _MAX_PLAYLIST_FEATURE_SONGS:
+            raise ValueError("playlist_features contains too many songs")
+        if not playlist_features:
+            return {}, None, 0
+        raw_width = len(next(iter(playlist_features.values())))
+        if not 1 <= raw_width <= _MAX_PLAYLIST_FEATURE_WIDTH:
+            raise ValueError("playlist_features has an invalid width")
+        normalized: dict[str, tuple[float, ...]] = {}
+        for song_id, raw_values in playlist_features.items():
+            if (
+                not isinstance(song_id, str)
+                or not song_id.strip()
+                or not isinstance(raw_values, (tuple, list))
+                or len(raw_values) != raw_width
+            ):
+                raise ValueError("playlist_features has invalid rows")
+            values = tuple(float(value) for value in raw_values)
+            if (
+                not np.isfinite(values).all()
+                or any(value < 0.0 or value > 1.0 for value in values)
+            ):
+                raise ValueError("playlist_features has invalid values")
+            normalized[song_id.strip()] = values
+
+        zero_features = (0.0,) * raw_width
+        feature_matrix = np.asarray(
+            [normalized.get(song.song_id, zero_features) for song in songs],
+            dtype=float,
+        )
+        if len(feature_matrix) < 2:
+            return normalized, None, raw_width
+        unsupported = [
+            label
+            for index, label in enumerate(labels)
+            if not targets[:, index].any() or targets[:, index].all()
+        ]
+        if unsupported or len(np.unique(feature_matrix, axis=0)) < 2:
+            return normalized, None, raw_width
+        classifier = OneVsRestClassifier(
+            LogisticRegression(
+                C=0.1,
+                max_iter=1000,
+                class_weight="balanced",
+            )
+        )
+        classifier.fit(feature_matrix, targets)
+        return normalized, classifier, raw_width
 
     def compose_text(self, song: Song) -> str:
         """Compose a request using the representation this artifact was trained on."""
@@ -215,7 +294,7 @@ class TextScorer:
     def apply_song_overrides(
         self, song: Song, scores: dict[str, float]
     ) -> dict[str, float]:
-        """Apply deterministic high-agreement artist or album evidence after text scoring.
+        """Apply metadata and optional public-playlist evidence after text scoring.
 
         The override is learned only from exact metadata values with at least
         two training songs and at least 80% agreement on one label. Artist
@@ -241,17 +320,59 @@ class TextScorer:
         if selected is None:
             selected = self.album_overrides.get(song.album_name.strip())
         if selected is None:
-            return adjusted
+            return self._apply_playlist_prior(song, adjusted)
         best_label = max(self.labels, key=lambda label: adjusted[label])
         if best_label == selected:
-            return adjusted
+            return self._apply_playlist_prior(song, adjusted)
         best_score = adjusted[best_label]
         if best_score >= 1.0:
             adjusted[selected] = 1.0
             adjusted[best_label] = float(np.nextafter(1.0, 0.0))
         else:
             adjusted[selected] = min(1.0, best_score + 1e-6)
-        return adjusted
+        return self._apply_playlist_prior(song, adjusted)
+
+    def _apply_playlist_prior(
+        self, song: Song, scores: dict[str, float]
+    ) -> dict[str, float]:
+        if self.playlist_classifier is None:
+            return scores
+        features = self.playlist_song_features.get(
+            song.song_id, (0.0,) * self.playlist_feature_width
+        )
+        if len(features) != self.playlist_feature_width:
+            return scores
+        try:
+            prior = np.asarray(
+                self.playlist_classifier.predict_proba(
+                    np.asarray(features, dtype=float).reshape(1, -1)
+                ),
+                dtype=float,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return scores
+        if prior.shape != (1, len(self.labels)):
+            return scores
+        prior_values = prior[0]
+        score_values = np.asarray([scores[label] for label in self.labels], dtype=float)
+        if (
+            not np.isfinite(prior_values).all()
+            or (prior_values <= 0.0).any()
+            or not np.isfinite(score_values).all()
+            or (score_values < 0.0).any()
+        ):
+            return scores
+        combined = np.log(np.clip(score_values, 1e-12, 1.0))
+        combined += self.playlist_prior_alpha * np.log(
+            np.clip(prior_values, 1e-12, 1.0)
+        )
+        combined -= np.max(combined)
+        probabilities = np.exp(np.clip(combined, -80.0, 0.0))
+        probabilities /= probabilities.sum()
+        return {
+            label: float(probability)
+            for label, probability in zip(self.labels, probabilities, strict=True)
+        }
 
     def apply_song_overrides_many(
         self, songs: list[Song], scores: np.ndarray
@@ -283,6 +404,12 @@ class TextScorer:
             if self.input_mode not in _INPUT_MODES:
                 raise ValueError("unsupported input mode")
             self._classifier_scores(self.classifier, probe, 1)
+            if self.playlist_classifier is not None:
+                check_is_fitted(self.playlist_classifier)
+                if len(self.playlist_classifier.estimators_) != len(self.labels):
+                    raise ValueError("playlist classifier estimators do not match labels")
+                if not 1 <= self.playlist_feature_width <= _MAX_PLAYLIST_FEATURE_WIDTH:
+                    raise ValueError("playlist classifier has invalid feature width")
         except (AttributeError, TypeError, ValueError) as error:
             raise ValueError("TextScorer has not been fitted") from error
         return self.vectorizer, self.classifier
@@ -437,6 +564,13 @@ def save_text_scorer(scorer: TextScorer, path: str | Path) -> None:
             "input_mode": scorer.input_mode,
             "artist_overrides": dict(scorer.artist_overrides),
             "album_overrides": dict(scorer.album_overrides),
+            "playlist_song_features": {
+                key: tuple(values)
+                for key, values in scorer.playlist_song_features.items()
+            },
+            "playlist_classifier": scorer.playlist_classifier,
+            "playlist_feature_width": scorer.playlist_feature_width,
+            "playlist_prior_alpha": scorer.playlist_prior_alpha,
         },
         Path(path),
     )
@@ -527,6 +661,50 @@ def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextSc
         for album, label in raw_album_overrides.items()
     ):
         raise ValueError("text scorer payload has invalid album overrides")
+    raw_playlist_features = record.get("playlist_song_features", {})
+    if not isinstance(raw_playlist_features, dict):
+        raise ValueError("text scorer payload has invalid playlist features")
+    if len(raw_playlist_features) > _MAX_PLAYLIST_FEATURE_SONGS:
+        raise ValueError("text scorer payload has too many playlist features")
+    playlist_feature_width = record.get("playlist_feature_width", 0)
+    if (
+        isinstance(playlist_feature_width, bool)
+        or not isinstance(playlist_feature_width, int)
+        or not 0 <= playlist_feature_width <= _MAX_PLAYLIST_FEATURE_WIDTH
+    ):
+        raise ValueError("text scorer payload has invalid playlist feature width")
+    playlist_song_features: dict[str, tuple[float, ...]] = {}
+    for song_id, raw_values in raw_playlist_features.items():
+        if (
+            not isinstance(song_id, str)
+            or not song_id.strip()
+            or not isinstance(raw_values, (tuple, list))
+            or len(raw_values) != playlist_feature_width
+            or playlist_feature_width == 0
+        ):
+            raise ValueError("text scorer payload has invalid playlist features")
+        values = tuple(float(value) for value in raw_values)
+        if (
+            not np.isfinite(values).all()
+            or any(value < 0.0 or value > 1.0 for value in values)
+        ):
+            raise ValueError("text scorer payload has invalid playlist features")
+        playlist_song_features[song_id.strip()] = values
+    playlist_classifier = record.get("playlist_classifier")
+    if playlist_classifier is not None and not isinstance(
+        playlist_classifier, OneVsRestClassifier
+    ):
+        raise ValueError("text scorer payload has invalid playlist classifier")
+    if playlist_classifier is not None and playlist_feature_width == 0:
+        raise ValueError("text scorer payload has invalid playlist classifier")
+    playlist_prior_alpha = record.get("playlist_prior_alpha", _PLAYLIST_PRIOR_ALPHA)
+    if (
+        isinstance(playlist_prior_alpha, bool)
+        or not isinstance(playlist_prior_alpha, (int, float, np.number))
+        or not np.isfinite(float(playlist_prior_alpha))
+        or not 0.0 <= float(playlist_prior_alpha) <= 1.0
+    ):
+        raise ValueError("text scorer payload has invalid playlist prior alpha")
     scorer = TextScorer(
         labels=labels,
         vectorizer=vectorizer,
@@ -535,6 +713,10 @@ def load_text_scorer(path: str | Path | Any, *, trusted: bool = False) -> TextSc
         input_mode=input_mode,
         artist_overrides=dict(raw_artist_overrides),
         album_overrides=dict(raw_album_overrides),
+        playlist_song_features=playlist_song_features,
+        playlist_classifier=playlist_classifier,
+        playlist_feature_width=playlist_feature_width,
+        playlist_prior_alpha=float(playlist_prior_alpha),
     )
     try:
         scorer._fitted_components()

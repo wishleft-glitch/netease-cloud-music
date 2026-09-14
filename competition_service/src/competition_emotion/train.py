@@ -17,6 +17,7 @@ from .constants import LABELS, MODEL_VERSION
 from .data import load_official_songs, workbook_snapshot
 from .evaluate import metric_report
 from .models import TextScorer, compose_model_text, save_text_scorer
+from .playlist import load_playlist_features
 from .splits import make_holdout
 from .types import Song
 
@@ -193,6 +194,7 @@ def train_text_baseline(
     seed: int = 20260910,
     test_ratio: float = 0.2,
     augment_workbook: Path | None = None,
+    playlist_prior_path: Path | None = None,
     fit_all_for_serving: bool = False,
 ) -> dict[str, Any]:
     """Train and evaluate with an official song-group-safe split.
@@ -222,6 +224,10 @@ def train_text_baseline(
             "added_songs": len(augmentation_songs),
             "excluded_overlap_songs": len(candidate_songs) - len(augmentation_songs),
         }
+    playlist_features: dict[str, tuple[float, ...]] | None = None
+    playlist_report: dict[str, Any] | None = None
+    if playlist_prior_path is not None:
+        playlist_features, playlist_report = load_playlist_features(playlist_prior_path)
     assignment = make_holdout(songs, test_ratio=test_ratio, seed=seed)
     official_train_songs = [song for song in songs if song.song_id in assignment.train_ids]
     train_songs = official_train_songs + augmentation_songs
@@ -232,7 +238,11 @@ def train_text_baseline(
     if len(official_train_songs) != len(assignment.train_ids) or len(test_songs) != len(assignment.test_ids):
         raise ValueError("split song IDs do not reconcile with the loaded data")
 
-    evaluation_scorer = TextScorer().fit(train_songs, configured_labels)
+    evaluation_scorer = TextScorer().fit(
+        train_songs,
+        configured_labels,
+        playlist_features=playlist_features,
+    )
     scores = evaluation_scorer.score_many([_text_for_score(song) for song in test_songs])
     scores = evaluation_scorer.apply_song_overrides_many(test_songs, scores)
     evaluation = metric_report(_targets(test_songs, configured_labels), scores, configured_labels)
@@ -261,6 +271,9 @@ def train_text_baseline(
             "artist_override_min_agreement": 0.8,
             "artist_override_count": len(evaluation_scorer.artist_overrides),
             "album_override_count": len(evaluation_scorer.album_overrides),
+            "playlist_feature_width": evaluation_scorer.playlist_feature_width,
+            "playlist_song_count": len(evaluation_scorer.playlist_song_features),
+            "playlist_prior_alpha": evaluation_scorer.playlist_prior_alpha,
         },
         "source": source,
         "labels": list(configured_labels),
@@ -285,10 +298,16 @@ def train_text_baseline(
     }
     if augmentation_report is not None:
         report["training_augmentation"] = augmentation_report
+    if playlist_report is not None:
+        report["playlist_prior"] = playlist_report
 
     scorer = evaluation_scorer
     if fit_all_for_serving:
-        scorer = TextScorer().fit(songs + augmentation_songs, configured_labels)
+        scorer = TextScorer().fit(
+            songs + augmentation_songs,
+            configured_labels,
+            playlist_features=playlist_features,
+        )
         report["serving_model_fit"] = {
             "songs": len(songs) + len(augmentation_songs),
             "evaluation_holdout_excluded_from_metrics": True,
@@ -296,6 +315,8 @@ def train_text_baseline(
         }
         report["postprocessing"]["artist_override_count"] = len(scorer.artist_overrides)
         report["postprocessing"]["album_override_count"] = len(scorer.album_overrides)
+        report["postprocessing"]["playlist_feature_width"] = scorer.playlist_feature_width
+        report["postprocessing"]["playlist_song_count"] = len(scorer.playlist_song_features)
 
     _publish_bundle(Path(bundle_dir), scorer, report, predictions)
     return report
@@ -313,6 +334,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="optional labelled workbook; only song IDs absent from the official source are added",
     )
     parser.add_argument(
+        "--playlist-prior",
+        type=Path,
+        help="optional public playlist JSON snapshot used as a weak song-ID prior",
+    )
+    parser.add_argument(
         "--fit-all-for-serving",
         action="store_true",
         help="retrain the published serving artifact on all official songs after holdout evaluation",
@@ -325,6 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=arguments.seed,
         test_ratio=arguments.test_ratio,
         augment_workbook=arguments.augment_workbook,
+        playlist_prior_path=arguments.playlist_prior,
         fit_all_for_serving=arguments.fit_all_for_serving,
     )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
