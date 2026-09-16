@@ -107,8 +107,8 @@ class IterationLoopTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "gate"):
                 publish_rubric_candidate(candidate, destination, gate_result={"passed": False}, approved=True)
             result = publish_rubric_candidate(candidate, destination, gate_result={"passed": True}, approved=True)
-            self.assertEqual(result["rubric_version"], "emotion-rubric-v1")
-            self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["rubric_version"], "emotion-rubric-v1")
+            self.assertEqual(result["rubric_version"], "emotion-rubric-v2")
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["rubric_version"], "emotion-rubric-v2")
 
 
 if __name__ == "__main__":

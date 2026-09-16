@@ -254,7 +254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Mine hard cases and create an unpublished Rubric patch proposal")
     parser.add_argument("--trace-path", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--base-rubric-version", default="emotion-rubric-v1")
+    parser.add_argument("--base-rubric-version", default="emotion-rubric-v2")
     parser.add_argument("--margin-threshold", default=0.10, type=float)
     parser.add_argument("--limit", default=100, type=int)
     arguments = parser.parse_args(argv)

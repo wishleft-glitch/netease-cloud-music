@@ -63,6 +63,18 @@ class CalibrationSplitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_calibration_split(self.songs, calibration_ratio=0.5, seed=1)
 
+    def test_opt_in_stratified_dev_preserves_singleton_support(self) -> None:
+        songs = (
+            [song(f"a{i}", "狂欢") for i in range(60)]
+            + [song(f"b{i}", "孤独") for i in range(40)]
+            + [song(f"m{i}", "狂欢", "孤独") for i in range(20)]
+        )
+        split = make_calibration_split(songs, calibration_ratio=0.2, seed=17, strategy="stratified")
+        by_id = {item.song_id: item for item in songs}
+        self.assertEqual(sum(by_id[item].labels == {"狂欢"} for item in split.dev_ids), 12)
+        self.assertEqual(sum(by_id[item].labels == {"孤独"} for item in split.dev_ids), 8)
+        self.assertEqual(sum(len(by_id[item].labels) == 2 for item in split.dev_ids), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

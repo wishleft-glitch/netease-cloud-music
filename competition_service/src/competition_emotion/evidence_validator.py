@@ -51,7 +51,7 @@ def validate_evidence(
         if not isinstance(quote, str) or not quote.strip() or len(quote.strip()) > 120:
             raise ValueError("each evidence quote must be a non-empty string of at most 120 characters")
         cleaned = quote.strip()
-        if normalized_lyrics and _normalize(cleaned) not in normalized_lyrics:
+        if _normalize(cleaned) not in normalized_lyrics:
             raise ValueError("evidence quote does not occur in supplied lyrics")
         cleaned_quotes.append(cleaned)
     if normalized_lyrics and require_quote and not cleaned_quotes:

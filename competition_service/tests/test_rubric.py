@@ -13,7 +13,7 @@ class RubricTests(unittest.TestCase):
     def test_default_rubric_is_versioned_and_covers_exact_official_labels(self) -> None:
         rubric = load_rubric(DEFAULT_RUBRIC_PATH)
 
-        self.assertEqual(rubric.version, "emotion-rubric-v1")
+        self.assertEqual(rubric.version, "emotion-rubric-v2")
         self.assertEqual(rubric.labels, LABELS)
         context = rubric.context(("孤独", "思念"))
         self.assertEqual([item["label"] for item in context], ["孤独", "思念"])

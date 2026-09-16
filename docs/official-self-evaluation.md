@@ -13,7 +13,10 @@ The command publishes an immutable versioned bundle under
 to find `active_bundle`; the evaluation artifact is
 `<BundleRoot>\<active_bundle>\report.json`.
 
-The report is the source of record for the following baseline metrics:
+The report is the source of record for the following historical baseline metrics.
+The fixed holdout has since been reused in model and routing comparisons, so
+it is development-exposed rather than an untouched blind test. See
+`docs/2026-09-16-evaluation-audit.md` before interpreting these numbers.
 
 | Measure | Report field | Definition |
 | --- | --- | --- |
@@ -64,7 +67,7 @@ Measured from the formal run on 2026-09-14:
 - Any-positive Top-10 coverage: 0.9900891972249752
 - Evaluation sample counts: 1,009 any-positive; 601 strict-singleton; 408 multi-label
 
-The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v9 score. The v9 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. Their independent Dev/Test result must be recorded before claiming the competition target.
+The earlier v4 report used the workbook's first-level genre field, which is absent from the official request protocol, so it is retained only as an offline oracle and is not comparable to this protocol-compliant v9 score. The v9 local result does not meet the 95% final-accuracy target or the 80% macro-recall gate by itself. The production path therefore keeps candidate-limited semantic review and the human hard-case queue available for low-margin requests. A result on a newly frozen, previously uninspected labeled set is required before claiming the competition target.
 
 On this fixed Test, the default `margin < 0.10` route sends 571 of the 601
 strict-singleton songs to review. The adaptive pool uses 10 candidates for 387
@@ -91,7 +94,9 @@ invalid or unavailable reviewer result falls back to the local model.
 
 `python -m competition_emotion.calibration` creates a deterministic Dev slice
 inside Official Train (`20260911`, 15% by default). The fixed Official Test
-split remains unchanged and is never used for threshold tuning. Optional
+split remains unchanged, but historical comparisons have already exposed it
+to development decisions. New thresholds must be selected inside Train/Dev;
+the historical Test is only a regression check. Optional
 `EMOTION_TRACE_PATH` writes append-only traces with model/Rubric versions,
 candidate margin, reviewer outcome, and verified evidence. `mine_hard_cases`
 and `evaluate_patch_gate` provide the review queue and regression gate for a

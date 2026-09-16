@@ -436,6 +436,7 @@ def create_app(
         message = {
             404: "not found",
             405: "method not allowed",
+            502: "audio unavailable",
         }.get(error.status_code, "request failed")
         return JSONResponse(
             status_code=error.status_code,
@@ -550,6 +551,8 @@ def create_app(
                     audio_result = await asyncio.shield(audio_task)
                 except (ValueError, RuntimeError, OSError, TimeoutError, httpx.HTTPError):
                     audio_result = RequestAudioResult("unavailable")
+            if audio_result.state != "measured":
+                raise StarletteHTTPException(status_code=502)
         metadata_fields: tuple[str, ...] = ()
         metadata_used = runtime.scorer.input_mode in {"metadata_v1", "metadata_v2"}
         if metadata_used:

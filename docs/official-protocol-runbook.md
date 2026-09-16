@@ -94,11 +94,13 @@ An older augmentation workbook may still be supplied for a research candidate
 with `-AugmentWorkbook`; it is never mixed into the accepted v9 run by default.
 
 Use `read_traces` and `mine_hard_cases` to build a review queue, then evaluate a
-proposed Rubric patch with `evaluate_patch_gate` on Dev and the immutable Test.
+proposed Rubric patch on Dev. The historical fixed Test is development-exposed
+after repeated comparisons and can only be a regression check; it is not a
+new blind test. See `docs/2026-09-16-evaluation-audit.md`.
 The patch generator marks proposals as `proposed` and requires human review;
 there is no online rule mutation.
 
-After the Dev/Test gate passes and a reviewer approves the change,
+After the Dev gate and historical regression check pass and a reviewer approves the change,
 `publish_rubric_candidate` atomically replaces the operator-selected Rubric
 file. A failed gate or missing approval cannot publish.
 
@@ -121,13 +123,13 @@ Restart with the same explicit nonsecret settings. The restart script canonicali
 
 Each launch writes separate stdout and stderr files under `BundleRoot\\logs\\service`. Restrict access to service operators, because an upstream dependency can emit sensitive operational detail. Rotate by age and size; a practical starting point is 14 days or 1 GiB total, adjusted to your incident-retention policy. Remove old logs with the approved host maintenance job, never by deleting the active state file.
 
-Collect and alert on QPS, end-to-end latency, HTTP error rate, CPU, memory, audio availability (`measured` versus `unavailable` evidence), and audio capacity saturation. Break latency down by request validation, model scoring, download, and ffmpeg decode when instrumentation is added. Alert on a sustained rise in unavailable audio, saturation, failures, or restart loops; health checks alone do not show request quality.
+Collect and alert on QPS, end-to-end latency, HTTP error rate, CPU, memory, audio download/decode failures (HTTP 502), and audio capacity saturation. Break latency down by request validation, model scoring, download, and ffmpeg decode when instrumentation is added. Alert on a sustained rise in audio failures, saturation, or restart loops; health checks alone do not show request quality.
 
 ## FAQ
 
 | Symptom | Likely cause | Recovery |
 | --- | --- | --- |
-| audio download fail or audio is unavailable | URL expired, target is not publicly routable, or the download budget elapsed | Verify a fresh HTTPS URL, DNS/public-address policy, and the configured audio budget. The ranked result still comes from lyrics/title. |
+| audio download fail or audio is unavailable | URL expired, target is not publicly routable, or the download budget elapsed | The API returns HTTP 502 without a label. Verify a fresh HTTPS URL, DNS/public-address policy, and the configured audio budget. |
 | proxy allowlist rejection | Proxy URL and allowlist were not supplied together, or the destination host is not an exact allowlisted DNS name | Supply both settings, remove paths/wildcards/IPs from the host list, and include the exact destination host. |
 | model loading failure at startup | `current.json`, the active bundle, report provenance, or `model.joblib` is missing or invalid | Stop the failed launch, restore a complete immutable bundle, validate the active report, then start again. |
 | OOM, high CPU, or growing memory | Concurrent requests/audio decodes exceed host capacity | Lower `MaxConcurrentAudio`, add CPU/memory capacity, and investigate ffmpeg and model process usage before retrying. |

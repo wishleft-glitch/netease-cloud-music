@@ -147,12 +147,12 @@ class ServiceTests(unittest.TestCase):
         self.assertGreaterEqual(response.json()["data"]["cost_ms"], 0)
         self.assertLessEqual(response.json()["data"]["cost_ms"], elapsed_ms + 100)
 
-    def test_audio_state_changes_only_evidence_and_never_the_ranked_output(self) -> None:
+    def test_audio_failure_returns_error_without_a_label(self) -> None:
         audio_app = create_app(_write_bundle(Path(self.directory.name) / "audio-bundle"))
         audio_client = TestClient(audio_app)
         scored = self._scores(狂欢=0.8, 孤独=0.2)
 
-        def recognize_with(state: str) -> dict[str, object]:
+        def recognize_with(state: str) -> httpx.Response:
             result = RequestAudioResult(
                 "measured", {"rms_db": -3.0}
             ) if state == "measured" else RequestAudioResult("unavailable")
@@ -160,18 +160,15 @@ class ServiceTests(unittest.TestCase):
                 "competition_emotion.service.acquire_request_audio", return_value=result
             ):
                 response = audio_client.post("/api/v1/emotion/recognize", json=self._request(text_lyric="任意歌词"))
-            self.assertEqual(response.status_code, 200)
-            return response.json()["data"]
+            return response
 
         measured = recognize_with("measured")
         unavailable = recognize_with("unavailable")
-        self.assertEqual(
-            (measured["top_emotion"], measured["top_confidence"], measured["second_emotion"], measured["second_confidence"]),
-            (unavailable["top_emotion"], unavailable["top_confidence"], unavailable["second_emotion"], unavailable["second_confidence"]),
-        )
-        self.assertIn("音频已完成测量", measured["evidence"])
-        self.assertIn("未用于当前标签", measured["evidence"])
-        self.assertIn("音频未参与", unavailable["evidence"])
+        self.assertEqual(measured.status_code, 200)
+        self.assertIn("音频已完成测量", measured.json()["data"]["evidence"])
+        self.assertIn("未用于当前标签", measured.json()["data"]["evidence"])
+        self.assertEqual(unavailable.status_code, 502)
+        self.assertEqual(unavailable.json(), {"code": 502, "message": "audio unavailable"})
 
     def test_audio_deadline_is_measured_from_request_ingress(self) -> None:
         audio_app = create_app(_write_bundle(Path(self.directory.name) / "deadline-bundle"))
@@ -181,10 +178,10 @@ class ServiceTests(unittest.TestCase):
         ) as acquire, patch("competition_emotion.service.monotonic", return_value=100.0):
             response = audio_client.post("/api/v1/emotion/recognize", json=self._request())
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 502)
         self.assertEqual(acquire.call_args.kwargs["deadline_monotonic"], 125.0)
 
-    def test_http_audio_error_keeps_a_valid_text_response_and_hides_url(self) -> None:
+    def test_http_audio_error_returns_safe_error_without_label_or_url(self) -> None:
         audio_app = create_app(_write_bundle(Path(self.directory.name) / "http-error-bundle"))
         audio_client = TestClient(audio_app)
         request = httpx.Request("GET", "https://audio.example.test/signed?token=secret")
@@ -194,9 +191,8 @@ class ServiceTests(unittest.TestCase):
         ):
             response = audio_client.post("/api/v1/emotion/recognize", json=self._request())
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["data"]["top_emotion"], "狂欢")
-        self.assertIn("音频未参与", response.json()["data"]["evidence"])
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"code": 502, "message": "audio unavailable"})
         self.assertNotIn("secret", response.text)
 
     def test_saturated_audio_capacity_skips_queue_and_keeps_health_responsive(self) -> None:
@@ -233,8 +229,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(health.status_code, 200)
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(second.status_code, 200)
-        self.assertIn("音频未参与", second.json()["data"]["evidence"])
+        self.assertEqual(second.status_code, 502)
+        self.assertEqual(second.json(), {"code": 502, "message": "audio unavailable"})
 
     def test_audio_capacity_is_shared_by_all_event_loops_for_one_app(self) -> None:
         audio_app = create_app(
@@ -280,7 +276,7 @@ class ServiceTests(unittest.TestCase):
                         client.post("/api/v1/emotion/recognize", json=self._request(song_id="second")), timeout=0.5
                     )
                     self.assertEqual(acquire.call_count, 1)
-                    self.assertIn("音频未参与", second.json()["data"]["evidence"])
+                    self.assertEqual(second.json(), {"code": 502, "message": "audio unavailable"})
                     release.set()
                     for _ in range(50):
                         if returned.call_count == 1:
@@ -293,7 +289,7 @@ class ServiceTests(unittest.TestCase):
             return second, third, acquire.call_count
 
         second, third, calls = asyncio.run(exercise())
-        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.status_code, 502)
         self.assertEqual(third.status_code, 200)
         self.assertEqual(calls, 2)
 
@@ -384,7 +380,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("语义复核选择候选", data["evidence"])
         candidates = review.call_args.args[2]
         self.assertEqual(candidates, ["孤独", "思念", "悲伤"])
-        self.assertEqual(review.call_args.args[4].version, "emotion-rubric-v1")
+        self.assertEqual(review.call_args.args[4].version, "emotion-rubric-v2")
 
     def test_semantic_review_shrinks_candidate_pool_for_a_clearer_low_margin_case(self) -> None:
         semantic_app = create_app(
@@ -425,7 +421,7 @@ class ServiceTests(unittest.TestCase):
         records = read_traces(trace_path)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].song_id, "abc")
-        self.assertEqual(records[0].rubric_version, "emotion-rubric-v1")
+        self.assertEqual(records[0].rubric_version, "emotion-rubric-v2")
 
     def test_required_only_request_reports_song_name_as_the_only_evidence(self) -> None:
         with patch.object(self.app.state.runtime.scorer, "score", return_value=self._scores(狂欢=0.8, 孤独=0.2)) as score:

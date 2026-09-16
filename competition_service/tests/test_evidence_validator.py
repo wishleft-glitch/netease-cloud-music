@@ -35,6 +35,10 @@ class EvidenceValidatorTests(unittest.TestCase):
         result = validate_evidence("", "基于歌曲名称进行判定。", rubric=self.rubric)
         self.assertEqual(result.quotes, ())
 
+    def test_rejects_quote_when_lyrics_are_empty(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not occur"):
+            validate_evidence("", "基于歌曲名称进行判定。", ["编造的歌词"], rubric=self.rubric)
+
 
 if __name__ == "__main__":
     unittest.main()

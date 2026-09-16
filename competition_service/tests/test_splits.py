@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from collections import Counter
 
 import numpy as np
 
 from competition_emotion.evaluate import metric_report
-from competition_emotion.splits import make_holdout
+from competition_emotion.splits import make_holdout, make_stratified_holdout
 from competition_emotion.types import Song
 
 
@@ -104,6 +105,33 @@ class HoldoutTests(unittest.TestCase):
         second = make_holdout(songs, test_ratio=0.2, seed=8)
 
         self.assertNotEqual(first, second)
+
+    def test_stratified_holdout_preserves_singleton_and_multilabel_rates(self) -> None:
+        songs = (
+            [song(f"a{i}", "A") for i in range(60)]
+            + [song(f"b{i}", "B") for i in range(40)]
+            + [song(f"m{i}", "A", "B") for i in range(20)]
+        )
+        first = make_stratified_holdout(songs, 0.2, 42)
+        second = make_stratified_holdout(list(reversed(songs)), 0.2, 42)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first.test_ids), 24)
+        self.assertEqual(len(first.train_ids), 96)
+        by_id = {item.song_id: item for item in songs}
+        counts = Counter(tuple(sorted(by_id[song_id].labels)) for song_id in first.test_ids)
+        self.assertEqual(counts, {("A",): 12, ("B",): 8, ("A", "B"): 4})
+        self.assertFalse(first.train_ids & first.test_ids)
+
+    def test_stratified_holdout_rejects_duplicate_ids(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unique"):
+            make_stratified_holdout([song("x", "A"), song("x", "B")], 0.2, 42)
+
+    def test_stratified_holdout_keeps_rare_singleton_labels_in_fit(self) -> None:
+        songs = [song(str(index), "common") for index in range(5)]
+        songs += [song(f"rare-{index}", f"rare-{index}") for index in range(5)]
+        split = make_stratified_holdout(songs, 0.2, 42)
+        self.assertEqual(len(split.test_ids), 2)
+        self.assertTrue({f"rare-{index}" for index in range(5)} <= split.train_ids)
 
 
 class MetricReportTests(unittest.TestCase):

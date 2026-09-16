@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .data import load_official_songs, workbook_snapshot
-from .splits import make_holdout
+from .splits import make_holdout, make_stratified_holdout
 from .types import Song
 
 
@@ -32,12 +32,16 @@ class CalibrationAssignment:
 
 
 def make_calibration_split(
-    train_songs: list[Song], *, calibration_ratio: float = 0.15, seed: int = 20260911
+    train_songs: list[Song], *, calibration_ratio: float = 0.15, seed: int = 20260911,
+    strategy: str = "legacy",
 ) -> CalibrationAssignment:
     """Reserve a deterministic Dev slice from the official Train songs."""
     if not train_songs:
         raise ValueError("train_songs cannot be empty")
-    assignment = make_holdout(train_songs, test_ratio=calibration_ratio, seed=seed)
+    if strategy not in {"legacy", "stratified"}:
+        raise ValueError("unknown calibration split strategy")
+    splitter = make_holdout if strategy == "legacy" else make_stratified_holdout
+    assignment = splitter(train_songs, test_ratio=calibration_ratio, seed=seed)
     return CalibrationAssignment(assignment.train_ids, assignment.test_ids)
 
 
@@ -51,6 +55,7 @@ def build_calibration_manifest(
     official_seed: int,
     calibration_seed: int,
     official_test_ratio: float = 0.2,
+    calibration_strategy: str = "legacy",
 ) -> dict[str, Any]:
     total = frozenset(total_ids)
     official_test = frozenset(official_test_ids)
@@ -64,7 +69,7 @@ def build_calibration_manifest(
         "schema_version": CALIBRATION_SCHEMA_VERSION,
         "source": dict(source),
         "official_split": {"seed": official_seed, "test_ratio": official_test_ratio},
-        "calibration_split": {"seed": calibration_seed, "dev_ratio": calibration_ratio},
+        "calibration_split": {"seed": calibration_seed, "dev_ratio": calibration_ratio, "strategy": calibration_strategy},
         "counts": {"total": len(total), "official_test": len(official_test), "fit": len(fit_ids), "dev": len(dev_ids)},
         "overlap": {"fit_test": len(fit_ids & official_test), "dev_test": len(dev_ids & official_test), "fit_dev": len(fit_ids & dev_ids)},
         "ids": {"official_test": sorted(official_test), "fit": sorted(fit_ids), "dev": sorted(dev_ids)},
@@ -79,12 +84,13 @@ def create_calibration_manifest(
     test_ratio: float = 0.2,
     calibration_seed: int = 20260911,
     calibration_ratio: float = 0.15,
+    calibration_strategy: str = "legacy",
 ) -> dict[str, Any]:
     with workbook_snapshot(Path(workbook)) as (snapshot_path, source):
         songs = load_official_songs(snapshot_path)
     official = make_holdout(songs, test_ratio=test_ratio, seed=official_seed)
     train_songs = [song for song in songs if song.song_id in official.train_ids]
-    calibration = make_calibration_split(train_songs, calibration_ratio=calibration_ratio, seed=calibration_seed)
+    calibration = make_calibration_split(train_songs, calibration_ratio=calibration_ratio, seed=calibration_seed, strategy=calibration_strategy)
     manifest = build_calibration_manifest(
         source=source,
         total_ids={song.song_id for song in songs},
@@ -94,6 +100,7 @@ def create_calibration_manifest(
         official_seed=official_seed,
         official_test_ratio=test_ratio,
         calibration_seed=calibration_seed,
+        calibration_strategy=calibration_strategy,
     )
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--test-ratio", default=0.2, type=float)
     parser.add_argument("--calibration-seed", default=20260911, type=int)
     parser.add_argument("--calibration-ratio", default=0.15, type=float)
+    parser.add_argument("--calibration-strategy", choices=("legacy", "stratified"), default="legacy")
     arguments = parser.parse_args(argv)
     manifest = create_calibration_manifest(
         arguments.workbook,
@@ -117,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         test_ratio=arguments.test_ratio,
         calibration_seed=arguments.calibration_seed,
         calibration_ratio=arguments.calibration_ratio,
+        calibration_strategy=arguments.calibration_strategy,
     )
     print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
     return 0

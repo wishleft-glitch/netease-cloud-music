@@ -35,11 +35,11 @@ class EvidenceTests(unittest.TestCase):
             lyric_used=True,
             title_used=False,
             metadata_used=True,
-            lyric_text="一个人走在夜里，没人理解我的沉默。",
+            lyric_text="一个人寂寞独处，没人理解我的沉默。",
             label="孤独",
             rubric=self.rubric,
         )
-        self.assertIn("歌词证据：\u201c一个人\u201d", evidence)
+        self.assertIn("歌词证据：\u201c寂寞独处\u201d", evidence)
 
     def test_does_not_add_a_quote_when_no_rubric_cue_occurs(self) -> None:
         evidence = build_evidence(
